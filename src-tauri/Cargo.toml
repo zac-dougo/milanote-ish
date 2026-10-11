@@ -1,0 +1,23 @@
+[package]
+name = "milanote-ish"
+version = "0.1.0"
+description = "Local visual planning for macOS"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.38", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
