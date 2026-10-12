@@ -6,9 +6,9 @@ Built with Tauri, React, TypeScript, and SQLite. The interface uses a colour-blo
 
 ## Working slice
 
-The first build supports main boards, freely positioned cards, stacked headings/text/images, block reordering, card colours, width resizing, canvas pan/zoom, image picker/drop/paste, recoverable card deletion through Trash, and automatic SQLite saving. Imported originals and thumbnails live in the local library.
+The current build supports freely positioned main and nested boards, breadcrumbs, freely positioned cards, stacked headings/text/images, block reordering, card colours, saved front/back ordering, width resizing, canvas pan/zoom, image picker/drop/paste, recoverable card and board-subtree deletion through Trash, and automatic SQLite saving. Imported originals and thumbnails live in the local library.
 
-Nested boards, connectors, rich text, quotes, links, checklists, file cards, undo/redo, and backup/restore are specified but not yet implemented. This build is for trying the interaction and desktop stack, not storing important work yet.
+Connectors, rich text, quotes, links, checklists, file cards, undo/redo, and backup/restore are specified but not yet implemented. This build is for trying the interaction and desktop stack, not storing important work yet.
 
 ## Run locally
 
@@ -19,7 +19,9 @@ npm ci
 npm run tauri -- dev
 ```
 
-Create a board, name it, then add text or images from the left rail. Drag a card using its top strip. Select it to add/reorder content, change colour, or delete it. The Mac Delete key also removes a selected card; Trash restores it. Resize its width with the lower-right handle. Scroll to pan, pinch to zoom, or use the header controls. Double-click an image for its original-size preview.
+Create a board, name it, then add text or images from the left rail. The Board tool creates a child inside the current board, or a main board on Home. Use breadcrumbs to return to a parent. Board tiles move by their top strip and open with double-click, Return, or Open. Drag a card using its top strip. Select it to add/reorder content, change colour, or delete it. The Mac Delete key also removes a selected card; Trash restores it. Resize its width with the lower-right handle. Scroll to pan, pinch to zoom, or use the header controls. Double-click an image for its original-size preview.
+
+The last canvas and its view reopen with the desktop app. Older working-build libraries migrate automatically, with a recovery SQLite copy kept beside the library before migration.
 
 The desktop app saves in `~/Library/Application Support/com.zacdougo.milanoteish/`. The browser-only preview from `npm run dev` is temporary and never writes a library.
 
@@ -44,4 +46,4 @@ The local Apple Silicon build is produced at `src-tauri/target/release/bundle/ma
 
 User-supplied visual references are kept locally and excluded from the public repository.
 
-See the implementation specification for the full v1 scope and the measured working-slice report for verification results when available.
+See the implementation specification for the full v1 scope and [the measured working-slice report](docs/working-slice-report.md) for verification results when available.

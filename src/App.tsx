@@ -8,9 +8,13 @@ import { block, COLORS, id, INITIAL_CAMERA, makeCard } from "./model";
 import type { Block, Board, Camera, Card } from "./model";
 import * as storage from "./storage";
 import { SaveQueue } from "./save-queue";
+import { boardPath, HOME_CAMERA, isBoardLive } from "./boards";
+import { BoardTile, TILE_HEIGHT, TILE_WIDTH } from "./BoardTile";
 
 type Job = () => Promise<void>;
-function useSaves() {
+function useSaves(importing: boolean) {
+  const busy = useRef(importing);
+  busy.current = importing;
   const queue = useRef(new SaveQueue());
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [status, setStatus] = useState("Saved");
@@ -50,6 +54,7 @@ function useSaves() {
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
         event.preventDefault();
+        if (busy.current) return;
         try {
           await flush();
           await invoke("finish_quit");
@@ -62,6 +67,7 @@ function useSaves() {
         else off = unlisten;
       });
     void listen("app:quit-requested", () => {
+      if (busy.current) return;
       void flush()
         .then(() => invoke("finish_quit"))
         .catch(() => {});
@@ -186,6 +192,7 @@ const CardView = memo(function CardView({
   onPreview,
   onFlush,
   onDelete,
+  onOrder,
 }: {
   card: Card;
   selected: boolean;
@@ -196,6 +203,7 @@ const CardView = memo(function CardView({
   onPreview: (image: Extract<Block, { kind: "image" }>) => void;
   onFlush: () => void;
   onDelete: (id: string) => void;
+  onOrder: (id: string, front: boolean) => void;
 }) {
   const node = useRef<HTMLElement>(null);
   const drag = useRef<{
@@ -253,7 +261,12 @@ const CardView = memo(function CardView({
       ref={node}
       tabIndex={-1}
       className={`card surface-${card.color}${selected ? " selected" : ""}`}
-      style={{ left: card.x, top: card.y, width: card.width }}
+      style={{
+        left: card.x,
+        top: card.y,
+        width: card.width,
+        zIndex: selected ? 2147483647 : (card.order ?? 0),
+      }}
       onPointerDown={(e) => {
         e.stopPropagation();
         onSelect(card.id);
@@ -367,6 +380,8 @@ const CardView = memo(function CardView({
       </div>
       {selected && (
         <div className="card-tools">
+          <button onClick={() => onOrder(card.id, true)}>Bring to front</button>
+          <button onClick={() => onOrder(card.id, false)}>Send to back</button>
           <button className="delete-card" onClick={() => onDelete(card.id)}>
             Delete card
           </button>
@@ -437,6 +452,9 @@ export default function App() {
   const [boardId, setBoardId] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showTrash, setShowTrash] = useState(false);
+  const [restoreDestinations, setRestoreDestinations] = useState<
+    Record<string, string>
+  >({});
   const [camera, setCamera] = useState<Camera>(INITIAL_CAMERA);
   const cameraRef = useRef(camera);
   const cameras = useRef<Record<string, Camera>>({});
@@ -452,8 +470,25 @@ export default function App() {
   const [hand, setHand] = useState(false);
   const space = useRef(false);
   const pan = useRef<{ x: number; y: number; camera: Camera } | null>(null);
-  const { schedule, flush, status, error } = useSaves();
+  const { schedule, flush, status, error } = useSaves(importing);
   const currentBoard = boards.find((b) => b.id === boardId);
+  const path = boardPath(boards, boardId);
+  const childBoards = boards.filter(
+    (b) => b.parentId === boardId && !b.trashed,
+  );
+  const visibleCards = cards.filter((c) => c.boardId === boardId && !c.trashed);
+  const itemCount = (id: string) =>
+    cards.filter((c) => c.boardId === id && !c.trashed).length +
+    boards.filter((b) => b.parentId === id && !b.trashed).length;
+  const changeBoard = useCallback(
+    (board: Board) => {
+      setBoards((previous) =>
+        previous.map((b) => (b.id === board.id ? board : b)),
+      );
+      schedule(`board:${board.id}`, () => storage.saveBoard(board));
+    },
+    [schedule],
+  );
   cameraRef.current = camera;
 
   useEffect(() => {
@@ -464,6 +499,14 @@ export default function App() {
         cardsRef.current = lib.cards;
         setCards(lib.cards);
         cameras.current = lib.cameras;
+        const last =
+          lib.lastCanvas &&
+          lib.lastCanvas !== HOME_CAMERA &&
+          isBoardLive(lib.boards, lib.lastCanvas)
+            ? lib.lastCanvas
+            : null;
+        setBoardId(last);
+        setCamera(lib.cameras[last ?? HOME_CAMERA] ?? INITIAL_CAMERA);
         setReady(true);
       })
       .catch((e) => setFatal(String(e)));
@@ -472,6 +515,20 @@ export default function App() {
   const changeCard = useCallback(
     (card: Card) => {
       const previous = cardsRef.current;
+      if (!previous.some((c) => c.id === card.id))
+        card = {
+          ...card,
+          order:
+            Math.max(
+              0,
+              ...previous
+                .filter((c) => c.boardId === card.boardId)
+                .map((c) => c.order ?? 0),
+              ...boards
+                .filter((b) => b.parentId === card.boardId)
+                .map((b) => b.order),
+            ) + 1,
+        };
       const next = previous.some((c) => c.id === card.id)
         ? previous.map((c) => (c.id === card.id ? card : c))
         : [...previous, card];
@@ -479,7 +536,28 @@ export default function App() {
       setCards(next);
       schedule(`card:${card.id}`, () => storage.saveCard(card));
     },
-    [schedule],
+    [schedule, boards],
+  );
+  const reorderItem = useCallback(
+    (id: string, front: boolean) => {
+      const orders = [
+        ...cardsRef.current
+          .filter((c) => c.boardId === boardId && !c.trashed)
+          .map((c) => c.order ?? 0),
+        ...boards
+          .filter((b) => b.parentId === boardId && !b.trashed)
+          .map((b) => b.order),
+      ];
+      const order = front
+        ? Math.max(0, ...orders) + 1
+        : Math.min(0, ...orders) - 1;
+      const card = cardsRef.current.find((c) => c.id === id);
+      const board = boards.find((b) => b.id === id);
+      if (card) changeCard({ ...card, order });
+      else if (board) changeBoard({ ...board, order });
+      setSelected(null);
+    },
+    [boardId, boards, changeCard, changeBoard],
   );
   const deleteCard = useCallback(
     (cardId: string) => {
@@ -497,34 +575,99 @@ export default function App() {
     (next: Camera) => {
       setCamera(next);
       cameraRef.current = next;
-      if (boardId) {
-        cameras.current[boardId] = next;
-        schedule(`camera:${boardId}`, () => storage.saveCamera(boardId, next));
-      }
+      const key = boardId ?? HOME_CAMERA;
+      cameras.current[key] = next;
+      schedule(`camera:${key}`, () => storage.saveCamera(key, next));
     },
     [boardId, schedule],
   );
-  const navigate = async (next: string | null) => {
+  const navigate = useCallback(
+    async (next: string | null) => {
+      if (importing) {
+        setNotice(
+          "Wait for the image import to finish before changing boards.",
+        );
+        return;
+      }
+      if (next && !isBoardLive(boards, next)) return;
+      try {
+        await flush();
+        schedule("session", () => storage.saveSession(next ?? HOME_CAMERA));
+        setSelected(null);
+        setBoardId(next);
+        setCamera(cameras.current[next ?? HOME_CAMERA] ?? INITIAL_CAMERA);
+      } catch {
+        /* Do not hide work that failed to save. */
+      }
+    },
+    [boards, importing, flush, schedule],
+  );
+  const deleteBoard = useCallback(
+    async (id: string) => {
+      const board = boards.find((b) => b.id === id);
+      if (!board || importing) return;
+      try {
+        await flush();
+        const next = { ...board, trashed: true };
+        await storage.saveBoard(next);
+        setBoards((previous) => previous.map((b) => (b.id === id ? next : b)));
+        setSelected(null);
+        if (boardId === id) {
+          schedule("session", () =>
+            storage.saveSession(board.parentId ?? HOME_CAMERA),
+          );
+          setBoardId(board.parentId);
+          setCamera(
+            cameras.current[board.parentId ?? HOME_CAMERA] ?? INITIAL_CAMERA,
+          );
+        }
+      } catch (e) {
+        setNotice(`Could not delete board: ${String(e)}`);
+      }
+    },
+    [boards, importing, flush, boardId, schedule],
+  );
+  const restoreBoard = async (board: Board) => {
+    const next = {
+      ...board,
+      trashed: false,
+      parentId:
+        board.parentId && isBoardLive(boards, board.parentId)
+          ? board.parentId
+          : null,
+    };
     try {
-      await flush();
-      setSelected(null);
-      setBoardId(next);
-      setCamera(
-        next ? (cameras.current[next] ?? INITIAL_CAMERA) : INITIAL_CAMERA,
+      await storage.saveBoard(next);
+      setBoards((previous) =>
+        previous.map((b) => (b.id === board.id ? next : b)),
       );
-    } catch {
-      /* Do not hide work that failed to save. */
+    } catch (e) {
+      setNotice(`Could not restore board: ${String(e)}`);
     }
   };
   const createBoard = async () => {
+    const point = canvasPoint();
     const board: Board = {
       id: id(),
       title: "Untitled board",
       color: COLORS[(boards.length + 1) % COLORS.length],
+      order:
+        Math.max(
+          0,
+          ...visibleCards.map((c) => c.order ?? 0),
+          ...childBoards.map((b) => b.order),
+        ) + 1,
+      parentId: boardId,
+      x: point.x - TILE_WIDTH / 2,
+      y: point.y - TILE_HEIGHT / 2,
+      trashed: false,
     };
     try {
+      await flush();
       await storage.saveBoard(board);
       setBoards((previous) => [...previous, board]);
+      schedule("session", () => storage.saveSession(board.id));
+      setSelected(null);
       setBoardId(board.id);
       setCamera(INITIAL_CAMERA);
     } catch (e) {
@@ -589,16 +732,14 @@ export default function App() {
     ) => {
       setImporting(true);
       const errors: string[] = [];
+      const origin = point ?? canvasPoint();
       try {
         for (const [index, path] of paths.entries()) {
           try {
-            applyImported(
-              await storage.importImage(path),
-              targetId,
-              point
-                ? { x: point.x + index * 40, y: point.y + index * 40 }
-                : undefined,
-            );
+            applyImported(await storage.importImage(path), targetId, {
+              x: origin.x + (index % 4) * 360,
+              y: origin.y + Math.floor(index / 4) * 360,
+            });
           } catch (e) {
             errors.push(String(e));
           }
@@ -608,7 +749,7 @@ export default function App() {
         setImporting(false);
       }
     },
-    [applyImported],
+    [applyImported, canvasPoint],
   );
   const chooseImage = useCallback(
     async (targetId?: string) => {
@@ -667,6 +808,9 @@ export default function App() {
     const paste = async (event: ClipboardEvent) => {
       if (
         !boardId ||
+        showTrash ||
+        preview ||
+        importing ||
         event.target instanceof HTMLTextAreaElement ||
         event.target instanceof HTMLInputElement
       )
@@ -703,7 +847,15 @@ export default function App() {
     };
     document.addEventListener("paste", paste);
     return () => document.removeEventListener("paste", paste);
-  }, [boardId, applyImported, canvasPoint, changeCard]);
+  }, [
+    boardId,
+    applyImported,
+    canvasPoint,
+    changeCard,
+    showTrash,
+    preview,
+    importing,
+  ]);
 
   const zoomAt = useCallback(
     (zoom: number, px?: number, py?: number) => {
@@ -722,7 +874,7 @@ export default function App() {
   );
   useEffect(() => {
     const element = canvas.current;
-    if (!element || !boardId) return;
+    if (!element) return;
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
       if (event.ctrlKey || event.metaKey) {
@@ -762,7 +914,8 @@ export default function App() {
       if (showTrash || preview) return;
       if ((e.key === "Delete" || e.key === "Backspace") && selected) {
         e.preventDefault();
-        deleteCard(selected);
+        if (boards.some((b) => b.id === selected)) void deleteBoard(selected);
+        else deleteCard(selected);
       }
       if (e.metaKey && ["+", "=", "-", "0"].includes(e.key)) {
         e.preventDefault();
@@ -781,19 +934,44 @@ export default function App() {
       window.removeEventListener("keyup", up);
       window.removeEventListener("blur", up);
     };
-  }, [updateCamera, zoomAt, selected, deleteCard, showTrash, preview]);
+  }, [
+    updateCamera,
+    zoomAt,
+    selected,
+    deleteCard,
+    showTrash,
+    preview,
+    boards,
+    boardId,
+    importing,
+  ]);
 
   const fit = () => {
     const visible = cards.filter((c) => c.boardId === boardId && !c.trashed);
     const rect = canvas.current?.getBoundingClientRect();
-    if (!visible.length || !rect) {
+    if ((!visible.length && !childBoards.length) || !rect) {
       updateCamera(INITIAL_CAMERA);
       return;
     }
-    const minX = Math.min(...visible.map((c) => c.x)),
-      minY = Math.min(...visible.map((c) => c.y));
-    const maxX = Math.max(...visible.map((c) => c.x + c.width)),
+    const minX = Math.min(
+        ...visible.map((c) => c.x),
+        ...childBoards.map((b) => b.x),
+      ),
+      minY = Math.min(
+        ...visible.map((c) => c.y),
+        ...childBoards.map((b) => b.y),
+      );
+    const maxX = Math.max(
+        ...visible.map((c) => c.x + c.width),
+        ...childBoards.map((b) => b.x + TILE_WIDTH),
+      ),
       maxY = Math.max(
+        ...childBoards.map(
+          (b) =>
+            b.y +
+            (document.getElementById(`board-${b.id}`)?.offsetHeight ??
+              TILE_HEIGHT),
+        ),
         ...visible.map(
           (c) =>
             c.y +
@@ -848,40 +1026,43 @@ export default function App() {
         </button>
         <nav className="breadcrumb" aria-label="Board navigation">
           <button onClick={() => void navigate(null)}>Home</button>
-          {currentBoard && (
-            <>
+          {path.map((board) => (
+            <span className="breadcrumb-part" key={board.id}>
               <span>/</span>
-              <span>{currentBoard.title || "Untitled board"}</span>
-            </>
-          )}
+              <button
+                aria-current={board.id === boardId ? "page" : undefined}
+                onClick={() => void navigate(board.id)}
+              >
+                {board.title || "Untitled board"}
+              </button>
+            </span>
+          ))}
         </nav>
         <div className="save-status">
           <span className={`status-dot ${error ? "error" : ""}`} />
           {storage.desktop ? status : "Temporary preview"}
         </div>
-        {boardId && (
-          <div className="zoom-controls">
-            <button
-              onClick={() => zoomAt(camera.zoom / 1.25)}
-              aria-label="Zoom out"
-            >
-              −
-            </button>
-            <button
-              onClick={() => updateCamera(INITIAL_CAMERA)}
-              title="Reset view"
-            >
-              {Math.round(camera.zoom * 100)}%
-            </button>
-            <button
-              onClick={() => zoomAt(camera.zoom * 1.25)}
-              aria-label="Zoom in"
-            >
-              +
-            </button>
-            <button onClick={fit}>Fit</button>
-          </div>
-        )}
+        <div className="zoom-controls">
+          <button
+            onClick={() => zoomAt(camera.zoom / 1.25)}
+            aria-label="Zoom out"
+          >
+            −
+          </button>
+          <button
+            onClick={() => updateCamera(INITIAL_CAMERA)}
+            title="Reset view"
+          >
+            {Math.round(camera.zoom * 100)}%
+          </button>
+          <button
+            onClick={() => zoomAt(camera.zoom * 1.25)}
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          <button onClick={fit}>Fit</button>
+        </div>
       </header>
       <aside className="rail">
         <button
@@ -905,7 +1086,6 @@ export default function App() {
         </button>
         <button
           className={hand ? "active" : ""}
-          disabled={!boardId}
           aria-pressed={hand}
           onClick={() => setHand((v) => !v)}
         >
@@ -919,7 +1099,11 @@ export default function App() {
         </button>
         <button onClick={() => setShowTrash(true)} aria-label="Open Trash">
           <span className="trash-symbol">⌫</span>
-          <span>Trash {cards.filter((c) => c.trashed).length || ""}</span>
+          <span>
+            Trash{" "}
+            {cards.filter((c) => c.trashed).length +
+              boards.filter((b) => b.trashed).length || ""}
+          </span>
         </button>
         <span className="rail-bottom">
           ON THIS
@@ -945,148 +1129,127 @@ export default function App() {
             )}
           </div>
         )}
-        {!boardId ? (
-          <section className="home">
-            <div className="home-intro">
-              <p className="eyebrow">YOUR LOCAL LIBRARY</p>
-              <h1>Your boards.</h1>
-              <p>
-                Images, notes and references.
-                <br />
-                Saved on this Mac.
-              </p>
-            </div>
-            <div className="board-grid">
-              {boards.map((board, index) => (
-                <button
-                  key={board.id}
-                  className={`board-tile surface-${board.color}`}
-                  onDoubleClick={() => void navigate(board.id)}
-                  onClick={() => void navigate(board.id)}
-                >
-                  <span className="tile-top">
-                    <span>BOARD {String(index + 1).padStart(2, "0")}</span>
-                    <span>↗</span>
-                  </span>
-                  <span className="tile-title">
-                    {board.title || "Untitled board"}
-                  </span>
-                  <span className="tile-count">
-                    {
-                      cards.filter((c) => c.boardId === board.id && !c.trashed)
-                        .length
-                    }{" "}
-                    cards
-                  </span>
-                </button>
+        <div className="board-bar">
+          {!boardId ? (
+            <h1>Your boards</h1>
+          ) : (
+            <input
+              aria-label="Board title"
+              value={currentBoard?.title ?? ""}
+              placeholder="Untitled board"
+              onChange={(e) => {
+                if (currentBoard)
+                  changeBoard({ ...currentBoard, title: e.target.value });
+              }}
+              onBlur={finishSave}
+            />
+          )}
+          {currentBoard && (
+            <button
+              disabled={importing}
+              onClick={() => void deleteBoard(currentBoard.id)}
+            >
+              Delete board
+            </button>
+          )}
+          <span>
+            {importing
+              ? "Copying image…"
+              : `${childBoards.length} boards${boardId ? ` · ${visibleCards.length} cards` : ""}`}
+          </span>
+        </div>
+        <div
+          ref={canvas}
+          className={`canvas ${hand ? "hand-mode" : ""}`}
+          tabIndex={0}
+          aria-label={boardId ? "Board canvas" : "Home canvas"}
+          onPointerDown={(e) => {
+            if (e.target !== e.currentTarget) return;
+            setSelected(null);
+            if (space.current || hand || e.button === 1) {
+              e.preventDefault();
+              pan.current = { x: e.clientX, y: e.clientY, camera };
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }
+          }}
+          onPointerMove={(e) => {
+            if (pan.current)
+              updateCamera({
+                ...pan.current.camera,
+                x: pan.current.camera.x + e.clientX - pan.current.x,
+                y: pan.current.camera.y + e.clientY - pan.current.y,
+              });
+          }}
+          onPointerUp={() => {
+            pan.current = null;
+            finishSave();
+          }}
+          onPointerCancel={() => {
+            pan.current = null;
+          }}
+        >
+          <div
+            className="canvas-world"
+            style={{
+              transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`,
+            }}
+          >
+            {childBoards.map((board) => (
+              <BoardTile
+                key={board.id}
+                board={board}
+                count={itemCount(board.id)}
+                selected={selected === board.id}
+                zoom={camera.zoom}
+                onSelect={setSelected}
+                onChange={changeBoard}
+                onOrder={reorderItem}
+                onOpen={navigate}
+                onDelete={deleteBoard}
+                onFlush={finishSave}
+              />
+            ))}
+            {cards
+              .filter((c) => c.boardId === boardId && !c.trashed)
+              .map((card) => (
+                <CardView
+                  key={card.id}
+                  card={card}
+                  selected={selected === card.id}
+                  zoom={camera.zoom}
+                  onSelect={setSelected}
+                  onChange={changeCard}
+                  onImage={chooseImage}
+                  onPreview={setPreview}
+                  onFlush={finishSave}
+                  onDelete={deleteCard}
+                  onOrder={reorderItem}
+                />
               ))}
-              <button className="new-board" onClick={() => void createBoard()}>
-                <Icon name="plus" />
-                <span>Start a board</span>
+          </div>
+          {!visibleCards.length && !childBoards.length && (
+            <div className="empty-board">
+              <span className="empty-mark">
+                <Icon name="board" />
+              </span>
+              <h2>{boardId ? "Empty board." : "Your local library."}</h2>
+              <p>
+                {boardId
+                  ? "Add a note, drop an image, or create a nested board."
+                  : "Start a board for your images, notes and references."}
+                <br />
+                Arrange it however you like.
+              </p>
+              <button onClick={boardId ? addNote : () => void createBoard()}>
+                {boardId ? "Add your first note" : "Start a board"}{" "}
+                <span>↗</span>
               </button>
             </div>
-            <p className="home-footnote">
-              Working build 01 · Text, images & free placement
-            </p>
-          </section>
-        ) : (
-          <>
-            <div className="board-bar">
-              <input
-                aria-label="Board title"
-                value={currentBoard?.title ?? ""}
-                placeholder="Untitled board"
-                onChange={(e) => {
-                  if (!currentBoard) return;
-                  const next = { ...currentBoard, title: e.target.value };
-                  setBoards((previous) =>
-                    previous.map((b) => (b.id === boardId ? next : b)),
-                  );
-                  schedule(`board:${boardId}`, () => storage.saveBoard(next));
-                }}
-                onBlur={finishSave}
-              />
-              <span>
-                {importing
-                  ? "Copying image…"
-                  : `${cards.filter((c) => c.boardId === boardId && !c.trashed).length} cards`}
-              </span>
-            </div>
-            <div
-              ref={canvas}
-              className={`canvas ${hand ? "hand-mode" : ""}`}
-              tabIndex={0}
-              aria-label="Board canvas"
-              onPointerDown={(e) => {
-                if (e.target !== e.currentTarget) return;
-                setSelected(null);
-                if (space.current || hand || e.button === 1) {
-                  e.preventDefault();
-                  pan.current = { x: e.clientX, y: e.clientY, camera };
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                }
-              }}
-              onPointerMove={(e) => {
-                if (pan.current)
-                  updateCamera({
-                    ...pan.current.camera,
-                    x: pan.current.camera.x + e.clientX - pan.current.x,
-                    y: pan.current.camera.y + e.clientY - pan.current.y,
-                  });
-              }}
-              onPointerUp={() => {
-                pan.current = null;
-                finishSave();
-              }}
-              onPointerCancel={() => {
-                pan.current = null;
-              }}
-            >
-              <div
-                className="canvas-world"
-                style={{
-                  transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`,
-                }}
-              >
-                {cards
-                  .filter((c) => c.boardId === boardId && !c.trashed)
-                  .map((card) => (
-                    <CardView
-                      key={card.id}
-                      card={card}
-                      selected={selected === card.id}
-                      zoom={camera.zoom}
-                      onSelect={setSelected}
-                      onChange={changeCard}
-                      onImage={chooseImage}
-                      onPreview={setPreview}
-                      onFlush={finishSave}
-                      onDelete={deleteCard}
-                    />
-                  ))}
-              </div>
-              {!cards.some((c) => c.boardId === boardId && !c.trashed) && (
-                <div className="empty-board">
-                  <span className="empty-mark">
-                    <Icon name="board" />
-                  </span>
-                  <h2>Empty board.</h2>
-                  <p>
-                    Add a note, drop an image, or paste a reference.
-                    <br />
-                    Arrange it however you like.
-                  </p>
-                  <button onClick={addNote}>
-                    Add your first note <span>↗</span>
-                  </button>
-                </div>
-              )}
-              <div className="canvas-hint">
-                Scroll to pan · Pinch to zoom · Drag a card by its top edge
-              </div>
-            </div>
-          </>
-        )}
+          )}
+          <div className="canvas-hint">
+            Scroll to pan · Pinch to zoom · Drag items by their top edge
+          </div>
+        </div>
       </main>
       {showTrash && (
         <div
@@ -1102,10 +1265,26 @@ export default function App() {
                 Close ×
               </button>
             </div>
-            <p>Deleted cards stay here until you restore them.</p>
-            {cards.filter((c) => c.trashed).length === 0 && (
-              <p>Your trash is empty.</p>
-            )}
+            <p>
+              Deleted boards keep their nested boards and cards. Restore them
+              together.
+            </p>
+            {boards
+              .filter((b) => b.trashed)
+              .map((board) => (
+                <div className="trash-item" key={board.id}>
+                  <div>
+                    <strong>{board.title || "Untitled board"}</strong>
+                    <span>Board and its contents</span>
+                  </div>
+                  <button onClick={() => void restoreBoard(board)}>
+                    Restore board
+                  </button>
+                </div>
+              ))}
+            {cards.filter((c) => c.trashed).length +
+              boards.filter((b) => b.trashed).length ===
+              0 && <p>Your trash is empty.</p>}
             {cards
               .filter((c) => c.trashed)
               .map((card) => (
@@ -1133,9 +1312,42 @@ export default function App() {
                         "Board"}
                     </span>
                   </div>
+                  {!isBoardLive(boards, card.boardId) && (
+                    <select
+                      aria-label="Restore card to board"
+                      value={restoreDestinations[card.id] ?? ""}
+                      onChange={(e) =>
+                        setRestoreDestinations((old) => ({
+                          ...old,
+                          [card.id]: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">Choose a board</option>
+                      {boards
+                        .filter((b) => isBoardLive(boards, b.id))
+                        .map((b) => (
+                          <option key={b.id} value={b.id}>
+                            {boardPath(boards, b.id)
+                              .map((p) => p.title || "Untitled board")
+                              .join(" / ")}
+                          </option>
+                        ))}
+                    </select>
+                  )}
                   <button
+                    disabled={
+                      !isBoardLive(boards, card.boardId) &&
+                      !restoreDestinations[card.id]
+                    }
                     onClick={() => {
-                      changeCard({ ...card, trashed: false });
+                      changeCard({
+                        ...card,
+                        boardId: isBoardLive(boards, card.boardId)
+                          ? card.boardId
+                          : restoreDestinations[card.id],
+                        trashed: false,
+                      });
                     }}
                   >
                     Restore

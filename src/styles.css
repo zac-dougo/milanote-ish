@@ -176,90 +176,75 @@ button:hover:not(:disabled) {
   min-height: 0;
   overflow: hidden;
 }
-.home {
-  overflow: auto;
-  padding: 62px 64px 28px;
-  flex: 1;
-  background: var(--canvas);
-}
-.home-intro {
-  margin-bottom: 48px;
-}
-.eyebrow {
-  font-size: 10px;
-  letter-spacing: 1.7px;
-  font-weight: 600;
-  margin: 0 0 16px;
-}
-.home h1 {
-  font-size: 44px;
-  letter-spacing: -1.8px;
-  line-height: 1.1;
-  font-weight: 600;
-  margin: 0 0 16px;
-}
-.home-intro > p:last-child {
-  color: #55645c;
-  font-size: 15px;
-  margin: 0;
-  line-height: 1.7;
-}
-.board-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 20px;
-  max-width: 1000px;
-}
-.board-tile {
+.canvas-board {
+  position: absolute;
   border: 1px solid #243b354d;
-  text-align: left;
-  min-height: 210px;
-  padding: 22px;
+}
+.canvas-board.selected {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  z-index: 2;
+}
+.board-tile-content {
+  height: 154px;
+  padding: 14px 18px;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  transition: transform 0.12s;
+  gap: 8px;
 }
-.board-tile:hover {
-  transform: translateY(-3px);
-}
-.tile-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 9px;
-  letter-spacing: 1.5px;
-}
-.tile-top > span:last-child {
-  font-size: 24px;
+.board-initial {
+  font-size: 28px;
+  font-weight: 600;
   line-height: 1;
 }
-.tile-title {
-  font-size: 25px;
-  line-height: 1.2;
-  letter-spacing: -0.5px;
-  margin-top: 36px;
-  overflow-wrap: anywhere;
+.board-tile-content input {
+  font-size: 18px;
+  font-weight: 600;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
 }
-.tile-count {
-  margin-top: auto;
-  padding-top: 22px;
-  font-size: 11px;
-}
-.new-board {
-  border: 1px dashed #243b3566;
-  min-height: 210px;
+.board-tile-bottom {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
-  font-size: 13px;
+  justify-content: space-between;
+  margin-top: auto;
+  font-size: 11px;
 }
-.home-footnote {
-  margin: 48px 0 0;
-  font-size: 10px;
-  letter-spacing: 0.5px;
-  color: #6c786e;
+.board-tile-bottom button {
+  padding: 3px 0 3px 8px;
+}
+.breadcrumb {
+  overflow-x: auto;
+}
+.breadcrumb-part {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-shrink: 0;
+}
+.breadcrumb-part button {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-bar h1 {
+  font-size: 18px;
+  margin: 0;
+  flex: 1;
+}
+.board-bar > button {
+  font-size: 11px;
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+}
+.trash-item select {
+  max-width: 240px;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  font: inherit;
 }
 .board-bar {
   height: 58px;

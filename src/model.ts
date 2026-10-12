@@ -17,13 +17,24 @@ export type Card = {
   color: string;
   blocks: Block[];
   trashed?: boolean;
+  order?: number;
 };
-export type Board = { id: string; title: string; color: string };
+export type Board = {
+  id: string;
+  title: string;
+  color: string;
+  parentId: string | null;
+  x: number;
+  y: number;
+  trashed: boolean;
+  order: number;
+};
 export type Camera = { x: number; y: number; zoom: number };
 export type Library = {
   boards: Board[];
   cards: Card[];
   cameras: Record<string, Camera>;
+  lastCanvas: string | null;
 };
 export const COLORS = ["paper", "yellow", "blue", "pink", "green"] as const;
 export const INITIAL_CAMERA: Camera = { x: 64, y: 64, zoom: 1 };
