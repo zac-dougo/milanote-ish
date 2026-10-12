@@ -36,6 +36,30 @@ enum Block {
     Text {
         id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        document: Option<Vec<TextLine>>,
+    },
+    Quote {
+        id: String,
+        text: String,
+        attribution: String,
+    },
+    Link {
+        id: String,
+        url: String,
+        title: String,
+    },
+    Checklist {
+        id: String,
+        items: Vec<ChecklistItem>,
+    },
+    File {
+        id: String,
+        asset: String,
+        name: String,
+        size: u64,
+        #[serde(rename = "mediaType")]
+        media_type: String,
     },
     Image {
         id: String,
@@ -43,6 +67,40 @@ enum Block {
         thumbnail: String,
         name: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
+enum TextLineKind {
+    Paragraph,
+    Bullet,
+    Number,
+}
+#[derive(Serialize, Deserialize, Clone)]
+struct TextSpan {
+    text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    bold: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    italic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    underline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    strike: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    href: Option<String>,
+}
+#[derive(Serialize, Deserialize, Clone)]
+struct TextLine {
+    kind: TextLineKind,
+    spans: Vec<TextSpan>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ChecklistItem {
+    id: String,
+    text: String,
+    done: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -105,10 +163,10 @@ fn db(root: &Path) -> Result<Connection> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    if version > 3 {
+    if version > 4 {
         return Err("This library was created by a newer version of the app.".into());
     }
-    if version > 0 && version < 3 {
+    if version > 0 && version < 4 {
         let recovery = root.join(format!(
             "library-v{version}-recovery-{}.sqlite3",
             uuid::Uuid::new_v4()
@@ -129,7 +187,7 @@ fn db(root: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cameras (board_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);").map_err(|e| e.to_string())?;
-    if version < 3 {
+    if version < 4 {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         if version < 2 {
             let rows = {
@@ -178,7 +236,7 @@ fn db(root: &Path) -> Result<Connection> {
           id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id),
           from_id TEXT NOT NULL, to_id TEXT NOT NULL, data TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS connectors_board ON connectors(board_id);
-          PRAGMA user_version=3;",
+          PRAGMA user_version=4;",
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -255,7 +313,51 @@ fn store_card(root: &Path, card: &Card) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
     for block in &card.blocks {
         let id = match block {
-            Block::Heading { id, .. } | Block::Text { id, .. } => id,
+            Block::Heading { id, .. } | Block::Quote { id, .. } | Block::Link { id, .. } => id,
+            Block::Text { id, text, document } => {
+                if let Some(lines) = document {
+                    let plain = lines
+                        .iter()
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|span| span.text.as_str())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if &plain != text {
+                        return Err("Formatted text does not match its readable text.".into());
+                    }
+                    for span in lines.iter().flat_map(|line| &line.spans) {
+                        if let Some(href) = &span.href {
+                            validated_web_url(href)?;
+                        }
+                    }
+                }
+                id
+            }
+            Block::Checklist { id, items } => {
+                let mut item_ids = std::collections::HashSet::new();
+                for item in items {
+                    uuid(&item.id)?;
+                    if !item_ids.insert(&item.id) {
+                        return Err("Duplicate checklist item identifier.".into());
+                    }
+                }
+                id
+            }
+            Block::File {
+                id, asset, size, ..
+            } => {
+                let metadata = fs::metadata(existing_asset(root, asset)?).map_err(|_| {
+                    "An imported file is missing. The card was not saved.".to_string()
+                })?;
+                if !metadata.is_file() || metadata.len() != *size {
+                    return Err("The imported file size has changed.".into());
+                }
+                id
+            }
             Block::Image {
                 id,
                 asset,
@@ -550,6 +652,136 @@ async fn import_clipboard(root: State<'_, LibraryPath>, bytes: Vec<u8>) -> Resul
         .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedFile {
+    asset: String,
+    name: String,
+    size: u64,
+    media_type: String,
+}
+
+fn copy_file(root: &Path, source: &Path) -> Result<ImportedFile> {
+    use std::io::Write;
+    let mut input = fs::File::open(source).map_err(|e| format!("Could not read file: {e}"))?;
+    if !input.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("Choose a file, rather than a folder.".into());
+    }
+    let name = source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Attachment")
+        .to_string();
+    let ext = source
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let ext =
+        if !ext.is_empty() && ext.len() <= 12 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+            ext.as_str()
+        } else {
+            "bin"
+        };
+    let asset = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    fs::create_dir_all(root.join("assets")).map_err(|e| e.to_string())?;
+    let destination = asset_path(root, &asset)?;
+    let staging = destination.with_extension("staging");
+    let result = (|| {
+        let mut output = fs::File::create(&staging).map_err(|e| e.to_string())?;
+        let size = std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+        output.flush().map_err(|e| e.to_string())?;
+        output.sync_all().map_err(|e| e.to_string())?;
+        fs::rename(&staging, destination).map_err(|e| e.to_string())?;
+        let media_type = match ext {
+            "pdf" => "application/pdf",
+            "txt" | "md" | "csv" => "text/plain",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "mp3" => "audio/mpeg",
+            "mp4" => "video/mp4",
+            _ => "application/octet-stream",
+        }
+        .into();
+        Ok(ImportedFile {
+            asset,
+            name,
+            size,
+            media_type,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(staging);
+    }
+    result
+}
+
+#[tauri::command]
+async fn import_file(root: State<'_, LibraryPath>, path: String) -> Result<ImportedFile> {
+    let root = root.0.clone();
+    tauri::async_runtime::spawn_blocking(move || copy_file(&root, Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn validated_web_url(value: &str) -> Result<String> {
+    let url = url::Url::parse(value.trim())
+        .map_err(|_| "Enter a valid HTTP or HTTPS address.".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("Only HTTP and HTTPS links without credentials can be opened.".into());
+    }
+    Ok(url.to_string())
+}
+
+#[tauri::command]
+fn open_link(url: String) -> Result<()> {
+    let url = validated_web_url(&url)?;
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg(url)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Could not open the link in your browser.".into())
+    }
+}
+
+fn existing_asset(root: &Path, asset: &str) -> Result<PathBuf> {
+    let assets = root
+        .join("assets")
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let path = asset_path(root, asset)?
+        .canonicalize()
+        .map_err(|_| "This attachment is missing from the local library.".to_string())?;
+    if path.parent() != Some(assets.as_path()) || !path.is_file() {
+        return Err("Invalid library attachment.".into());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+fn open_asset(root: State<LibraryPath>, asset: String, reveal: bool) -> Result<()> {
+    let path = existing_asset(&root.0, &asset)?;
+    let mut command = std::process::Command::new("/usr/bin/open");
+    if reveal {
+        command.arg("-R");
+    }
+    let status = command.arg(path).status().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Could not open the attachment. Try Show in Finder.".into())
+    }
+}
+
 #[tauri::command]
 fn finish_quit(app: tauri::AppHandle) {
     app.exit(0);
@@ -577,6 +809,9 @@ fn main() {
             save_session,
             import_image,
             import_clipboard,
+            import_file,
+            open_asset,
+            open_link,
             finish_quit
         ])
         .build(tauri::generate_context!())
@@ -623,6 +858,7 @@ mod tests {
             blocks: vec![Block::Text {
                 id: uuid::Uuid::new_v4().to_string(),
                 text: "A scene".into(),
+                document: None,
             }],
             trashed: false,
             order: 0.0,
@@ -639,6 +875,193 @@ mod tests {
             trashed: false,
         }
     }
+    #[test]
+    fn mixed_content_and_formatting_survive_reopen() {
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let source = root.join("story.pdf");
+        fs::write(&source, b"a file fixture").unwrap();
+        let imported = copy_file(&root, &source).unwrap();
+        fs::remove_file(source).unwrap();
+        let mut saved = card(owner.id.clone());
+        let uid = || uuid::Uuid::new_v4().to_string();
+        let doc: Vec<TextLine> = serde_json::from_value(serde_json::json!([
+            {"kind":"paragraph","spans":[{"text":"Bold","bold":true,"italic":true,"underline":true,"strike":true,"href":"https://example.com"}]},
+            {"kind":"bullet","spans":[{"text":"A list"}]}])).unwrap();
+        saved.blocks = vec![
+            Block::Text {
+                id: uid(),
+                text: "Bold\nA list".into(),
+                document: Some(doc),
+            },
+            Block::Quote {
+                id: uid(),
+                text: "A quotation".into(),
+                attribution: "Author".into(),
+            },
+            Block::Link {
+                id: uid(),
+                url: "unfinished address".into(),
+                title: "Reference".into(),
+            },
+            Block::Checklist {
+                id: uid(),
+                items: vec![ChecklistItem {
+                    id: uid(),
+                    text: "A shot".into(),
+                    done: true,
+                }],
+            },
+            Block::File {
+                id: uid(),
+                asset: imported.asset.clone(),
+                name: imported.name,
+                size: imported.size,
+                media_type: imported.media_type,
+            },
+        ];
+        store_card(&root, &saved).unwrap();
+        let conn = db(&root).unwrap();
+        let json: String = conn
+            .query_row("SELECT data FROM cards", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Card>(&json).unwrap().blocks.len(), 5);
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()
+        );
+        assert_eq!(
+            fs::read(existing_asset(&root, &imported.asset).unwrap()).unwrap(),
+            b"a file fixture"
+        );
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn files_stream_copy_and_validate_owned_paths_and_sizes() {
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let source = root.join("recording.MP4");
+        let bytes = vec![42u8; 2 * 1024 * 1024];
+        fs::write(&source, &bytes).unwrap();
+        let imported = copy_file(&root, &source).unwrap();
+        assert_eq!(imported.media_type, "video/mp4");
+        assert_eq!(imported.name, "recording.MP4");
+        assert_eq!(imported.size, bytes.len() as u64);
+        assert!(imported.asset.ends_with(".mp4"));
+        fs::remove_file(source).unwrap();
+        assert_eq!(
+            fs::read(existing_asset(&root, &imported.asset).unwrap()).unwrap(),
+            bytes
+        );
+        assert!(copy_file(&root, &root).is_err());
+        assert!(existing_asset(&root, "../library.sqlite3").is_err());
+        assert!(existing_asset(&root, "absent.pdf").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.join("library.sqlite3"),
+                root.join("assets/escape.pdf"),
+            )
+            .unwrap();
+            assert!(existing_asset(&root, "escape.pdf").is_err());
+        }
+        let mut saved = card(owner.id);
+        saved.blocks = vec![Block::File {
+            id: uuid::Uuid::new_v4().to_string(),
+            asset: imported.asset,
+            name: imported.name,
+            size: imported.size + 1,
+            media_type: imported.media_type,
+        }];
+        assert!(store_card(&root, &saved).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_links_formatting_and_duplicate_checklist_ids_are_rejected() {
+        for link in [
+            "javascript:alert(1)",
+            "file:///tmp/test",
+            "https://user:pass@example.com",
+            "not an address",
+        ] {
+            assert!(validated_web_url(link).is_err());
+        }
+        assert_eq!(
+            validated_web_url(" https://example.com/path ").unwrap(),
+            "https://example.com/path"
+        );
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let mut saved = card(owner.id);
+        let item = ChecklistItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: "One".into(),
+            done: false,
+        };
+        saved.blocks = vec![Block::Checklist {
+            id: uuid::Uuid::new_v4().to_string(),
+            items: vec![item.clone(), item],
+        }];
+        assert!(store_card(&root, &saved).unwrap_err().contains("Duplicate"));
+        saved.blocks = vec![Block::Text {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: "different".into(),
+            document: Some(
+                serde_json::from_value(
+                    serde_json::json!([{"kind":"paragraph","spans":[{"text":"original"}]}]),
+                )
+                .unwrap(),
+            ),
+        }];
+        assert!(store_card(&root, &saved)
+            .unwrap_err()
+            .contains("does not match"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_three_update_preserves_cards_and_recovery_snapshot() {
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let saved = card(owner.id);
+        store_card(&root, &saved).unwrap();
+        let conn = db(&root).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        drop(conn);
+        let conn = db(&root).unwrap();
+        assert_eq!(
+            conn.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            4
+        );
+        let backup = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_string_lossy().contains("v3-recovery"))
+            .unwrap();
+        let backup = Connection::open(backup).unwrap();
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            3
+        );
+        let json: String = backup
+            .query_row("SELECT data FROM cards", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Card>(&json).unwrap().id, saved.id);
+        drop(backup);
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn connectors_persist_reconnect_and_reject_foreign_or_missing_endpoints() {
         let root = root();
@@ -990,14 +1413,14 @@ mod tests {
     fn newer_library_is_left_untouched() {
         let root = root();
         let conn = db(&root).unwrap();
-        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
         drop(conn);
         assert!(db(&root).unwrap_err().contains("newer"));
         let conn = Connection::open(root.join("library.sqlite3")).unwrap();
         assert_eq!(
             conn.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
                 .unwrap(),
-            4
+            5
         );
         drop(conn);
         fs::remove_dir_all(root).unwrap();

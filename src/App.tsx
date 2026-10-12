@@ -4,14 +4,26 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { block, COLORS, id, INITIAL_CAMERA, makeCard } from "./model";
-import type { Block, Board, Camera, Card, Connector } from "./model";
+import {
+  block,
+  blockLabel,
+  contentBlock,
+  webUrl,
+  COLORS,
+  id,
+  INITIAL_CAMERA,
+  makeCard,
+} from "./model";
+import type { Block, Board, Camera, Card, Connector, Preset } from "./model";
 import * as storage from "./storage";
 import { SaveQueue } from "./save-queue";
 import { boardPath, HOME_CAMERA, isBoardLive } from "./boards";
 import { BoardTile, TILE_HEIGHT, TILE_WIDTH } from "./BoardTile";
 import { ConnectorLayer } from "./ConnectorLayer";
 import { connectorLive, endpointsAvailable, LINE_COLORS } from "./connectors";
+
+import { documentText, readDocument } from "./rich-text";
+import { ContentBlock } from "./ContentBlock";
 
 type Job = () => Promise<void>;
 function useSaves(importing: boolean) {
@@ -192,6 +204,7 @@ const CardView = memo(function CardView({
   onChange,
   onSelect,
   onImage,
+  onFile,
   onPreview,
   onFlush,
   onDelete,
@@ -203,6 +216,7 @@ const CardView = memo(function CardView({
   onChange: (card: Card) => void;
   onSelect: (id: string) => void;
   onImage: (cardId: string) => void;
+  onFile: (cardId: string) => void;
   onPreview: (image: Extract<Block, { kind: "image" }>) => void;
   onFlush: () => void;
   onDelete: (id: string) => void;
@@ -215,13 +229,6 @@ const CardView = memo(function CardView({
     y: number;
     last: Card;
   } | null>(null);
-  const updateBlock = (blockId: string, text: string) =>
-    onChange({
-      ...card,
-      blocks: card.blocks.map((b) =>
-        b.id === blockId && b.kind !== "image" ? { ...b, text } : b,
-      ),
-    });
   const begin = (e: ReactPointerEvent, kind: "move" | "resize") => {
     e.stopPropagation();
     e.preventDefault();
@@ -276,7 +283,7 @@ const CardView = memo(function CardView({
         onSelect(card.id);
         if (
           !(e.target as HTMLElement).closest(
-            'textarea, input, button, [role="button"], [role="slider"]',
+            'textarea, input, button, [contenteditable="true"], [role="button"], [role="slider"]',
           )
         )
           node.current?.focus();
@@ -327,26 +334,17 @@ const CardView = memo(function CardView({
                 onOpen={() => onPreview(b)}
               />
             ) : (
-              <textarea
-                aria-label={b.kind === "heading" ? "Card heading" : "Card text"}
-                placeholder={
-                  b.kind === "heading" ? "Add a heading…" : "Write something…"
+              <ContentBlock
+                value={b}
+                onFlush={onFlush}
+                onChange={(value) =>
+                  onChange({
+                    ...card,
+                    blocks: card.blocks.map((item) =>
+                      item.id === value.id ? value : item,
+                    ),
+                  })
                 }
-                value={b.text}
-                rows={1}
-                spellCheck
-                onBlur={onFlush}
-                ref={(el) => {
-                  if (el) {
-                    el.style.height = "0px";
-                    el.style.height = `${el.scrollHeight}px`;
-                  }
-                }}
-                onChange={(e) => {
-                  updateBlock(b.id, e.target.value);
-                  e.target.style.height = "0px";
-                  e.target.style.height = `${e.target.scrollHeight}px`;
-                }}
               />
             )}
             {selected && (
@@ -403,7 +401,26 @@ const CardView = memo(function CardView({
           >
             + Text
           </button>
+          {(["quote", "link", "checklist"] as const).map((kind) => (
+            <button
+              key={kind}
+              onClick={() =>
+                onChange({
+                  ...card,
+                  blocks: [...card.blocks, contentBlock(kind)],
+                })
+              }
+            >
+              +{" "}
+              {kind === "quote"
+                ? "Quote"
+                : kind === "link"
+                  ? "Link"
+                  : "Checklist"}
+            </button>
+          ))}
           <button onClick={() => onImage(card.id)}>+ Image</button>
+          <button onClick={() => onFile(card.id)}>+ File</button>
           <div className="swatches">
             {COLORS.map((color) => (
               <button
@@ -494,7 +511,7 @@ export default function App() {
     boards.find((b) => b.id === id)?.title ||
     cards
       .find((c) => c.id === id)
-      ?.blocks.map((b) => (b.kind === "image" ? b.name : b.text))
+      ?.blocks.map(blockLabel)
       .find(Boolean)
       ?.slice(0, 45) ||
     "Untitled item";
@@ -680,9 +697,7 @@ export default function App() {
   const navigate = useCallback(
     async (next: string | null) => {
       if (importing) {
-        setNotice(
-          "Wait for the image import to finish before changing boards.",
-        );
+        setNotice("Wait for the import to finish before changing boards.");
         return;
       }
       if (next && !isBoardLive(boards, next)) return;
@@ -796,13 +811,66 @@ export default function App() {
         view.zoom,
     };
   }, []);
-  const addNote = () => {
+  const addNote = (kind: Preset = "text") => {
     if (!boardId) return;
     const point = canvasPoint();
-    const card = makeCard(boardId, point.x - 160, point.y - 90);
+    const card = makeCard(boardId, point.x - 160, point.y - 90, [
+      contentBlock(kind),
+    ]);
     changeCard(card);
     setSelected(card.id);
   };
+
+  const chooseFile = useCallback(
+    async (targetId?: string) => {
+      if (!storage.desktop || !boardId) {
+        setNotice("File importing is available in the desktop app.");
+        return;
+      }
+      try {
+        const selectedPaths = await open({ multiple: true, directory: false });
+        if (!selectedPaths) return;
+        setImporting(true);
+        const point = canvasPoint();
+        const errors: string[] = [];
+        for (const [index, path] of (Array.isArray(selectedPaths)
+          ? selectedPaths
+          : [selectedPaths]
+        ).entries()) {
+          try {
+            const value: Block = {
+              ...(await storage.importFile(path)),
+              kind: "file",
+              id: id(),
+            };
+            const target = targetId
+              ? cardsRef.current.find((c) => c.id === targetId && !c.trashed)
+              : undefined;
+            if (target)
+              changeCard({ ...target, blocks: [...target.blocks, value] });
+            else if (!targetId) {
+              const card = makeCard(
+                boardId,
+                point.x - 160 + (index % 4) * 360,
+                point.y - 100 + Math.floor(index / 4) * 360,
+                [value],
+              );
+              changeCard(card);
+              setSelected(card.id);
+            }
+          } catch (e) {
+            errors.push(`${path.split("/").pop()}: ${String(e)}`);
+          }
+        }
+        if (errors.length) setNotice(errors.join("\n"));
+      } catch (e) {
+        setNotice(String(e));
+      } finally {
+        setImporting(false);
+      }
+    },
+    [boardId, canvasPoint, changeCard],
+  );
 
   const applyImported = useCallback(
     (
@@ -835,6 +903,7 @@ export default function App() {
       paths: string[],
       targetId?: string,
       point?: { x: number; y: number },
+      attachments = false,
     ) => {
       setImporting(true);
       const errors: string[] = [];
@@ -842,10 +911,20 @@ export default function App() {
       try {
         for (const [index, path] of paths.entries()) {
           try {
-            applyImported(await storage.importImage(path), targetId, {
+            const at = {
               x: origin.x + (index % 4) * 360,
               y: origin.y + Math.floor(index / 4) * 360,
-            });
+            };
+            if (attachments && !/\.(png|jpe?g|webp|gif)$/i.test(path)) {
+              const value: Block = {
+                ...(await storage.importFile(path)),
+                kind: "file",
+                id: id(),
+              };
+              const card = makeCard(boardId!, at.x - 160, at.y - 100, [value]);
+              changeCard(card);
+              setSelected(card.id);
+            } else applyImported(await storage.importImage(path), targetId, at);
           } catch (e) {
             errors.push(String(e));
           }
@@ -855,7 +934,7 @@ export default function App() {
         setImporting(false);
       }
     },
-    [applyImported, canvasPoint],
+    [applyImported, canvasPoint, boardId, changeCard],
   );
   const chooseImage = useCallback(
     async (targetId?: string) => {
@@ -897,7 +976,7 @@ export default function App() {
             event.payload.position.x / scale,
             event.payload.position.y / scale,
           );
-          void importPaths(event.payload.paths, undefined, point);
+          void importPaths(event.payload.paths, undefined, point, true);
         }
       })
       .then((unlisten) => {
@@ -917,6 +996,8 @@ export default function App() {
         showTrash ||
         preview ||
         importing ||
+        (event.target instanceof HTMLElement &&
+          !!event.target.closest('[contenteditable="true"]')) ||
         event.target instanceof HTMLTextAreaElement ||
         event.target instanceof HTMLInputElement
       )
@@ -943,9 +1024,20 @@ export default function App() {
         if (text) {
           event.preventDefault();
           const p = canvasPoint();
-          const card = makeCard(boardId, p.x - 160, p.y - 90, [
-            block("text", text),
-          ]);
+          const html = event.clipboardData?.getData("text/html");
+          const parsed = html
+            ? new DOMParser().parseFromString(html, "text/html")
+            : null;
+          const document = parsed ? readDocument(parsed.body) : undefined;
+          const content: Block = webUrl(text)
+            ? { id: id(), kind: "link", url: text.trim(), title: "" }
+            : {
+                id: id(),
+                kind: "text",
+                text: document ? documentText(document) : text,
+                ...(document ? { document } : {}),
+              };
+          const card = makeCard(boardId, p.x - 160, p.y - 90, [content]);
           changeCard(card);
           setSelected(card.id);
         }
@@ -1004,6 +1096,8 @@ export default function App() {
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (
+        (e.target instanceof HTMLElement &&
+          !!e.target.closest('[contenteditable="true"]')) ||
         e.target instanceof HTMLTextAreaElement ||
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLSelectElement
@@ -1190,7 +1284,7 @@ export default function App() {
           <span>Home</span>
         </button>
         <div className="rail-rule" />
-        <button disabled={!boardId || importing} onClick={addNote}>
+        <button disabled={!boardId || importing} onClick={() => addNote()}>
           <Icon name="note" />
           <span>Text</span>
         </button>
@@ -1200,6 +1294,31 @@ export default function App() {
         >
           <Icon name="image" />
           <span>Image</span>
+        </button>
+        {(["quote", "link", "checklist"] as const).map((kind) => (
+          <button
+            key={kind}
+            disabled={!boardId || importing}
+            onClick={() => addNote(kind)}
+          >
+            <span className="tool-glyph">
+              {kind === "quote" ? "“”" : kind === "link" ? "↗" : "☑"}
+            </span>
+            <span>
+              {kind === "quote"
+                ? "Quote"
+                : kind === "link"
+                  ? "Link"
+                  : "Checklist"}
+            </span>
+          </button>
+        ))}
+        <button
+          disabled={!boardId || importing}
+          onClick={() => void chooseFile()}
+        >
+          <Icon name="note" />
+          <span>File</span>
         </button>
         <button
           disabled={!boardId || importing}
@@ -1286,7 +1405,7 @@ export default function App() {
           )}
           <span>
             {importing
-              ? "Copying image…"
+              ? "Copying assets…"
               : `${childBoards.length} boards${boardId ? ` · ${visibleCards.length} cards` : ""}`}
           </span>
         </div>
@@ -1524,6 +1643,7 @@ export default function App() {
                   onSelect={selectItem}
                   onChange={changeCard}
                   onImage={chooseImage}
+                  onFile={chooseFile}
                   onPreview={setPreview}
                   onFlush={finishSave}
                   onDelete={deleteCard}
@@ -1544,7 +1664,9 @@ export default function App() {
                 <br />
                 Arrange it however you like.
               </p>
-              <button onClick={boardId ? addNote : () => void createBoard()}>
+              <button
+                onClick={boardId ? () => addNote() : () => void createBoard()}
+              >
                 {boardId ? "Add your first note" : "Start a board"}{" "}
                 <span>↗</span>
               </button>
@@ -1617,20 +1739,9 @@ export default function App() {
                   <div>
                     <strong>
                       {card.blocks
-                        .filter(
-                          (
-                            b,
-                          ): b is Extract<
-                            Block,
-                            { kind: "heading" | "text" }
-                          > => b.kind !== "image",
-                        )
-                        .map((b) => b.text)
+                        .map(blockLabel)
                         .find(Boolean)
-                        ?.slice(0, 60) ||
-                        (card.blocks.some((b) => b.kind === "image")
-                          ? "Image card"
-                          : "Untitled card")}
+                        ?.slice(0, 60) || "Untitled card"}
                     </strong>
                     <span>
                       {boards.find((b) => b.id === card.boardId)?.title ||

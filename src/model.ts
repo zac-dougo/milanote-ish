@@ -1,5 +1,26 @@
+import type { TextDocument } from "./rich-text";
 export type Block =
-  | { id: string; kind: "heading" | "text"; text: string }
+  | {
+      id: string;
+      kind: "heading" | "text";
+      text: string;
+      document?: TextDocument;
+    }
+  | { id: string; kind: "quote"; text: string; attribution: string }
+  | { id: string; kind: "link"; url: string; title: string }
+  | {
+      id: string;
+      kind: "checklist";
+      items: { id: string; text: string; done: boolean }[];
+    }
+  | {
+      id: string;
+      kind: "file";
+      asset: string;
+      name: string;
+      size: number;
+      mediaType: string;
+    }
   | {
       id: string;
       kind: "image";
@@ -70,4 +91,39 @@ export function makeCard(
     color: "paper",
     blocks: blocks ?? [block("text")],
   };
+}
+
+export type Preset = "text" | "quote" | "link" | "checklist";
+export function contentBlock(kind: Preset): Block {
+  if (kind === "quote") return { id: id(), kind, text: "", attribution: "" };
+  if (kind === "link") return { id: id(), kind, url: "", title: "" };
+  if (kind === "checklist")
+    return { id: id(), kind, items: [{ id: id(), text: "", done: false }] };
+  return block("text");
+}
+export function blockLabel(b: Block): string {
+  switch (b.kind) {
+    case "image":
+    case "file":
+      return b.name;
+    case "link":
+      return b.title || b.url;
+    case "checklist":
+      return b.items.map((item) => item.text).find(Boolean) || "Checklist";
+    default:
+      return b.text;
+  }
+}
+export function webUrl(value: string): URL | null {
+  try {
+    const url = new URL(value.trim());
+    return ["http:", "https:"].includes(url.protocol) &&
+      !!url.hostname &&
+      !url.username &&
+      !url.password
+      ? url
+      : null;
+  } catch {
+    return null;
+  }
 }

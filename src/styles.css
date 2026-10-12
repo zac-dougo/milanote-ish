@@ -716,3 +716,156 @@ button:hover:not(:disabled) {
   color: #fffef8;
   font-size: 12px;
 }
+
+.tool-glyph {
+  font-size: 25px;
+  line-height: 1;
+}
+.block input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+  font-size: 14px;
+}
+.quote-text {
+  border-left: 4px solid #a04732;
+  padding-left: 12px;
+}
+.quote-text textarea {
+  font-family: Georgia, serif;
+  font-size: 18px;
+}
+.block input.quote-attribution {
+  padding-left: 16px;
+  font-size: 12px;
+  color: #56645a;
+}
+.link-content > input:first-child {
+  font-weight: 650;
+}
+.link-content > input:nth-child(2) {
+  font-size: 12px;
+}
+.attachment-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.attachment-actions span {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  flex: 1;
+}
+.attachment-actions button,
+.add-checklist-item {
+  background: #243b35;
+  color: #fffef8;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+.file-content {
+  border-left: 4px solid #295c7b;
+  padding-left: 12px;
+}
+.file-content strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+.file-content small {
+  display: block;
+  font-size: 11px;
+  margin-top: 5px;
+  color: #56645a;
+}
+.block p[role="alert"] {
+  font-size: 12px;
+  color: #9c3825;
+  overflow-wrap: anywhere;
+}
+.checklist-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.checklist-row input[type="checkbox"] {
+  accent-color: #243b35;
+  flex-shrink: 0;
+}
+.checklist-row input.completed {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.checklist-actions {
+  display: flex;
+  flex-shrink: 0;
+}
+.checklist-actions button {
+  padding: 3px;
+  font-size: 11px;
+}
+.add-checklist-item {
+  margin-top: 7px;
+}
+.rich-text {
+  min-height: 24px;
+  font-size: 14px;
+  line-height: 1.6;
+  outline: none;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.rich-text p {
+  margin: 0;
+  min-height: 1.6em;
+}
+.rich-text ul,
+.rich-text ol {
+  margin: 0;
+  padding-left: 22px;
+}
+.rich-text a {
+  color: #295c7b;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.rich-toolbar {
+  display: none;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-bottom: 7px;
+  border-bottom: 1px solid #243b3533;
+  padding-bottom: 6px;
+}
+.card.selected .rich-toolbar {
+  display: flex;
+}
+.rich-toolbar button {
+  font-size: 11px;
+  padding: 3px 5px;
+  background: #243b3512;
+}
+.rich-toolbar button[aria-label="Bold"] {
+  font-weight: bold;
+}
+.rich-toolbar button[aria-label="Italic"] {
+  font-style: italic;
+}
+.rich-toolbar button[aria-label="Underline"] {
+  text-decoration: underline;
+}
+.rich-toolbar button[aria-label="Strikethrough"] {
+  text-decoration: line-through;
+}
+.rich-link-entry {
+  display: flex;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+.rich-link-entry button {
+  font-size: 11px;
+}

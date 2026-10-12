@@ -46,3 +46,16 @@ export async function importClipboard(
 ): Promise<{ asset: string; thumbnail: string; name: string }> {
   return invoke("import_clipboard", { bytes });
 }
+
+export async function importFile(
+  path: string,
+): Promise<{ asset: string; name: string; size: number; mediaType: string }> {
+  return invoke("import_file", { path });
+}
+export async function openFile(asset: string, reveal = false) {
+  if (desktop) await invoke("open_asset", { asset, reveal });
+}
+export async function openLink(url: string) {
+  if (desktop) await invoke("open_link", { url });
+  else window.open(url, "_blank", "noopener,noreferrer");
+}
