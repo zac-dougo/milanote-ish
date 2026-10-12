@@ -4,5 +4,10 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
-  server: { port: 1420, strictPort: true },
+  server: {
+    port: 1420,
+    strictPort: true,
+    // Native build output must not reload the temporary preview or enter Vite's watcher.
+    watch: { ignored: ["**/src-tauri/**"] },
+  },
 });

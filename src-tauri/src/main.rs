@@ -61,6 +61,18 @@ struct Card {
     order: f64,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Connector {
+    id: String,
+    board_id: String,
+    from_id: String,
+    to_id: String,
+    arrow: String,
+    color: String,
+    trashed: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Camera {
     x: f64,
@@ -72,6 +84,7 @@ struct Camera {
 struct Library {
     boards: Vec<Board>,
     cards: Vec<Card>,
+    connectors: Vec<Connector>,
     cameras: std::collections::HashMap<String, Camera>,
     #[serde(rename = "lastCanvas")]
     last_canvas: Option<String>,
@@ -92,10 +105,10 @@ fn db(root: &Path) -> Result<Connection> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    if version > 2 {
+    if version > 3 {
         return Err("This library was created by a newer version of the app.".into());
     }
-    if version > 0 && version < 2 {
+    if version > 0 && version < 3 {
         let recovery = root.join(format!(
             "library-v{version}-recovery-{}.sqlite3",
             uuid::Uuid::new_v4()
@@ -116,46 +129,56 @@ fn db(root: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cameras (board_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);").map_err(|e| e.to_string())?;
-    if version < 2 {
+    if version < 3 {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let rows = {
-            let mut stmt = tx
-                .prepare("SELECT id, data FROM boards ORDER BY rowid")
+        if version < 2 {
+            let rows = {
+                let mut stmt = tx
+                    .prepare("SELECT id, data FROM boards ORDER BY rowid")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?
+            };
+            for (index, (id, json)) in rows.into_iter().enumerate() {
+                let mut data: serde_json::Value =
+                    serde_json::from_str(&json).map_err(|e| e.to_string())?;
+                let fields = data.as_object_mut().ok_or("Invalid saved board.")?;
+                fields.entry("parentId").or_insert(serde_json::Value::Null);
+                fields
+                    .entry("x")
+                    .or_insert(serde_json::json!((index % 3) as f64 * 280.0));
+                fields
+                    .entry("y")
+                    .or_insert(serde_json::json!((index / 3) as f64 * 220.0));
+                fields.entry("trashed").or_insert(serde_json::json!(false));
+                serde_json::from_value::<Board>(data.clone())
+                    .map_err(|e| format!("Invalid saved board: {e}"))?;
+                tx.execute(
+                    "UPDATE boards SET data=?2 WHERE id=?1",
+                    params![id, data.to_string()],
+                )
                 .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                .map_err(|e| e.to_string())?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?
-        };
-        for (index, (id, json)) in rows.into_iter().enumerate() {
-            let mut data: serde_json::Value =
-                serde_json::from_str(&json).map_err(|e| e.to_string())?;
-            let fields = data.as_object_mut().ok_or("Invalid saved board.")?;
-            fields.entry("parentId").or_insert(serde_json::Value::Null);
-            fields
-                .entry("x")
-                .or_insert(serde_json::json!((index % 3) as f64 * 280.0));
-            fields
-                .entry("y")
-                .or_insert(serde_json::json!((index / 3) as f64 * 220.0));
-            fields.entry("trashed").or_insert(serde_json::json!(false));
-            serde_json::from_value::<Board>(data.clone())
-                .map_err(|e| format!("Invalid saved board: {e}"))?;
-            tx.execute(
-                "UPDATE boards SET data=?2 WHERE id=?1",
-                params![id, data.to_string()],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        // Home has a viewport but is not a content board. Preserve the old cameras
-        // while removing the board-only foreign key, then validate owners on writes.
-        tx.execute_batch(
-            "ALTER TABLE cameras RENAME TO old_cameras;
+            }
+            // Home has a viewport but is not a content board. Preserve the old cameras
+            // while removing the board-only foreign key, then validate owners on writes.
+            tx.execute_batch(
+                "ALTER TABLE cameras RENAME TO old_cameras;
           CREATE TABLE cameras (board_id TEXT PRIMARY KEY, data TEXT NOT NULL);
           INSERT INTO cameras SELECT * FROM old_cameras;
           DROP TABLE old_cameras;
-          PRAGMA user_version=2;",
+",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS connectors (
+          id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id),
+          from_id TEXT NOT NULL, to_id TEXT NOT NULL, data TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS connectors_board ON connectors(board_id);
+          PRAGMA user_version=3;",
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -270,6 +293,99 @@ fn store_card(root: &Path, card: &Card) -> Result<()> {
     Ok(())
 }
 
+fn endpoint_available(conn: &Connection, owner: &str, id: &str) -> Result<bool> {
+    let card = conn
+        .query_row("SELECT data FROM cards WHERE id=?1", [id], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(json) = card {
+        let card: Card = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        return Ok(card.board_id == owner && !card.trashed);
+    }
+    let tile = conn
+        .query_row("SELECT data FROM boards WHERE id=?1", [id], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match tile {
+        Some(json) => {
+            let board: Board = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            Ok(board.parent_id.as_deref() == Some(owner) && !board.trashed)
+        }
+        None => Ok(false),
+    }
+}
+
+fn connector_available(conn: &Connection, line: &Connector) -> Result<bool> {
+    Ok(line.from_id != line.to_id
+        && validate_parent(conn, "", Some(&line.board_id)).is_ok()
+        && endpoint_available(conn, &line.board_id, &line.from_id)?
+        && endpoint_available(conn, &line.board_id, &line.to_id)?)
+}
+
+fn store_connector(root: &Path, connector: &Connector) -> Result<()> {
+    for id in [
+        &connector.id,
+        &connector.board_id,
+        &connector.from_id,
+        &connector.to_id,
+    ] {
+        uuid(id)?;
+    }
+    if connector.from_id == connector.to_id {
+        return Err("Choose two different items to connect.".into());
+    }
+    if !["none", "target"].contains(&connector.arrow.as_str())
+        || !["#243b35", "#a04732", "#295c7b", "#466333"].contains(&connector.color.as_str())
+    {
+        return Err("Invalid connector style.".into());
+    }
+    let mut conn = db(root)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let existing = tx
+        .query_row(
+            "SELECT data FROM connectors WHERE id=?1",
+            [&connector.id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let existing = existing
+        .map(|json| serde_json::from_str::<Connector>(&json).map_err(|e| e.to_string()))
+        .transpose()?;
+    if existing
+        .as_ref()
+        .is_some_and(|line| line.board_id != connector.board_id)
+    {
+        return Err("A connector cannot change boards.".into());
+    }
+    // Explicitly trashed lines retain their endpoint references. Endpoint deletion
+    // also makes a line effectively trashed, atomically via the endpoint's state.
+    let changed_endpoints = existing
+        .as_ref()
+        .is_some_and(|line| line.from_id != connector.from_id || line.to_id != connector.to_id);
+    if (!connector.trashed || existing.is_none() || changed_endpoints)
+        && !connector_available(&tx, connector)?
+    {
+        return Err("Connectors must join live items on the same board.".into());
+    }
+    tx.execute("INSERT INTO connectors (id, board_id, from_id, to_id, data) VALUES (?1, ?2, ?3, ?4, ?5)
+      ON CONFLICT(id) DO UPDATE SET from_id=excluded.from_id, to_id=excluded.to_id, data=excluded.data",
+      params![connector.id, connector.board_id, connector.from_id, connector.to_id, serde_json::to_string(connector).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn save_connector(root: State<LibraryPath>, connector: Connector) -> Result<()> {
+    store_connector(&root.0, &connector)
+}
+
 #[tauri::command]
 fn load_library(root: State<LibraryPath>) -> Result<Library> {
     let conn = db(&root.0)?;
@@ -291,6 +407,10 @@ fn load_library(root: State<LibraryPath>) -> Result<Library> {
         .iter()
         .map(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
         .collect::<Result<Vec<Card>>>()?;
+    let connectors = read("connectors")?
+        .iter()
+        .map(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<Connector>>>()?;
     let mut stmt = conn
         .prepare("SELECT board_id, data FROM cameras")
         .map_err(|e| e.to_string())?;
@@ -305,6 +425,7 @@ fn load_library(root: State<LibraryPath>) -> Result<Library> {
     Ok(Library {
         boards,
         cards,
+        connectors,
         cameras,
         last_canvas: conn
             .query_row(
@@ -450,6 +571,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_library,
             save_card,
+            save_connector,
             save_board,
             save_camera,
             save_session,
@@ -506,6 +628,168 @@ mod tests {
             order: 0.0,
         }
     }
+    fn line(board_id: &str, from_id: &str, to_id: &str) -> Connector {
+        Connector {
+            id: uuid::Uuid::new_v4().to_string(),
+            board_id: board_id.into(),
+            from_id: from_id.into(),
+            to_id: to_id.into(),
+            arrow: "target".into(),
+            color: "#243b35".into(),
+            trashed: false,
+        }
+    }
+    #[test]
+    fn connectors_persist_reconnect_and_reject_foreign_or_missing_endpoints() {
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let tile = board(uuid::Uuid::new_v4().to_string(), Some(owner.id.clone()));
+        store_board(&root, &tile).unwrap();
+        let a = card(owner.id.clone());
+        let b = card(owner.id.clone());
+        store_card(&root, &a).unwrap();
+        store_card(&root, &b).unwrap();
+        let mut edge = line(&owner.id, &a.id, &b.id);
+        store_connector(&root, &edge).unwrap();
+        edge.to_id = tile.id.clone();
+        edge.arrow = "none".into();
+        edge.color = "#a04732".into();
+        store_connector(&root, &edge).unwrap();
+        let conn = db(&root).unwrap();
+        let saved: String = conn
+            .query_row("SELECT data FROM connectors WHERE id=?1", [&edge.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let saved: Connector = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved.to_id, tile.id);
+        assert_eq!(saved.arrow, "none");
+        assert_eq!(saved.color, "#a04732");
+        let foreign = card(tile.id.clone());
+        store_card(&root, &foreign).unwrap();
+        for target in [
+            &foreign.id,
+            &a.id,
+            &owner.id,
+            &uuid::Uuid::new_v4().to_string(),
+        ] {
+            edge.to_id = target.clone();
+            assert!(store_connector(&root, &edge).is_err());
+        }
+        edge.to_id = tile.id;
+        edge.color = "url(https://example.com)".into();
+        assert!(store_connector(&root, &edge).is_err());
+        assert_eq!(
+            conn.query_row::<String, _, _>(
+                "SELECT data FROM connectors WHERE id=?1",
+                [&edge.id],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            serde_json::to_string(&saved).unwrap()
+        );
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn endpoint_and_subtree_trash_atomically_hide_lines_without_reviving_manual_deletions() {
+        let root = root();
+        let mut owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let mut tile = board(uuid::Uuid::new_v4().to_string(), Some(owner.id.clone()));
+        store_board(&root, &tile).unwrap();
+        let mut a = card(owner.id.clone());
+        store_card(&root, &a).unwrap();
+        let mut edge = line(&owner.id, &a.id, &tile.id);
+        store_connector(&root, &edge).unwrap();
+        let conn = db(&root).unwrap();
+        assert!(connector_available(&conn, &edge).unwrap());
+        a.trashed = true;
+        store_card(&root, &a).unwrap();
+        assert!(!connector_available(&conn, &edge).unwrap());
+        assert!(store_connector(&root, &edge).is_err());
+        a.trashed = false;
+        store_card(&root, &a).unwrap();
+        assert!(connector_available(&conn, &edge).unwrap());
+        tile.trashed = true;
+        store_board(&root, &tile).unwrap();
+        assert!(!connector_available(&conn, &edge).unwrap());
+        tile.trashed = false;
+        store_board(&root, &tile).unwrap();
+        owner.trashed = true;
+        store_board(&root, &owner).unwrap();
+        assert!(!connector_available(&conn, &edge).unwrap());
+        owner.trashed = false;
+        store_board(&root, &owner).unwrap();
+        assert!(connector_available(&conn, &edge).unwrap());
+        edge.trashed = true;
+        store_connector(&root, &edge).unwrap();
+        a.trashed = true;
+        store_card(&root, &a).unwrap();
+        a.trashed = false;
+        store_card(&root, &a).unwrap();
+        let json: String = conn
+            .query_row("SELECT data FROM connectors WHERE id=?1", [&edge.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(serde_json::from_str::<Connector>(&json).unwrap().trashed);
+        // Retained endpoints may not be swapped for arbitrary missing IDs while trashed.
+        edge.to_id = uuid::Uuid::new_v4().to_string();
+        assert!(store_connector(&root, &edge).is_err());
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn version_two_migration_preserves_existing_data_and_recovery_copy() {
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let saved = card(owner.id.clone());
+        store_card(&root, &saved).unwrap();
+        let conn = db(&root).unwrap();
+        conn.execute_batch("DROP TABLE connectors; PRAGMA user_version=2;")
+            .unwrap();
+        drop(conn);
+        let conn = db(&root).unwrap();
+        let json: String = conn
+            .query_row("SELECT data FROM cards", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Card>(&json).unwrap().id, saved.id);
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM connectors", [], |r| r.get(0))
+                .unwrap(),
+            0
+        );
+        let recovery = fs::read_dir(&root)
+            .unwrap()
+            .map(|r| r.unwrap().path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("v2-recovery")
+            })
+            .unwrap();
+        let backup = Connection::open(recovery).unwrap();
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            backup
+                .query_row::<String, _, _>("SELECT data FROM cards", [], |r| r.get(0))
+                .unwrap(),
+            json
+        );
+        drop(backup);
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn hierarchy_rejects_cycles_and_keeps_subtree_on_restore() {
         let root = root();
@@ -706,14 +990,14 @@ mod tests {
     fn newer_library_is_left_untouched() {
         let root = root();
         let conn = db(&root).unwrap();
-        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
         drop(conn);
         assert!(db(&root).unwrap_err().contains("newer"));
         let conn = Connection::open(root.join("library.sqlite3")).unwrap();
         assert_eq!(
             conn.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
                 .unwrap(),
-            3
+            4
         );
         drop(conn);
         fs::remove_dir_all(root).unwrap();

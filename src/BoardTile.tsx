@@ -51,13 +51,14 @@ export const BoardTile = memo(function BoardTile({
   return (
     <article
       id={`board-${board.id}`}
+      data-canvas-item={board.id}
       ref={node}
       className={`canvas-board surface-${board.color}${selected ? " selected" : ""}`}
       style={{
         left: board.x,
         top: board.y,
         width: TILE_WIDTH,
-        zIndex: selected ? 2147483647 : board.order,
+        zIndex: selected ? 2147483646 : board.order,
       }}
       tabIndex={0}
       aria-label={`Board tile: ${board.title || "Untitled board"}`}

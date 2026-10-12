@@ -132,6 +132,7 @@ button:hover:not(:disabled) {
   border-right: 0;
 }
 .rail {
+  overflow-y: auto;
   background: var(--yellow);
   border-right: 1px solid var(--line);
   padding: 18px 10px;
@@ -290,6 +291,73 @@ button:hover:not(:disabled) {
   width: 0;
   height: 0;
   transform-origin: 0 0;
+}
+.connector-lines,
+.connector-handles {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.connector-lines {
+  z-index: -2147483648;
+}
+.connector-handles {
+  z-index: 2147483647;
+}
+.connector-hit {
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.connector-handle {
+  pointer-events: all;
+  fill: var(--canvas);
+  stroke: var(--ink);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+  cursor: crosshair;
+}
+.connector-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 20px;
+  background: #c5d0ad;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  min-height: 44px;
+}
+.connector-tools label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.connector-tools select {
+  font: inherit;
+  max-width: 130px;
+  border: 1px solid var(--line);
+  background: var(--canvas);
+  padding: 4px;
+}
+.connector-tools > button {
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  background: var(--canvas);
+}
+.line-colors {
+  display: flex;
+  gap: 6px;
+}
+.line-colors button {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--canvas);
+}
+.line-colors button[aria-pressed="true"] {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
 }
 .card {
   position: absolute;

@@ -5,11 +5,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { block, COLORS, id, INITIAL_CAMERA, makeCard } from "./model";
-import type { Block, Board, Camera, Card } from "./model";
+import type { Block, Board, Camera, Card, Connector } from "./model";
 import * as storage from "./storage";
 import { SaveQueue } from "./save-queue";
 import { boardPath, HOME_CAMERA, isBoardLive } from "./boards";
 import { BoardTile, TILE_HEIGHT, TILE_WIDTH } from "./BoardTile";
+import { ConnectorLayer } from "./ConnectorLayer";
+import { connectorLive, endpointsAvailable, LINE_COLORS } from "./connectors";
 
 type Job = () => Promise<void>;
 function useSaves(importing: boolean) {
@@ -88,7 +90,7 @@ function useSaves(importing: boolean) {
 function Icon({
   name,
 }: {
-  name: "note" | "image" | "board" | "home" | "plus" | "hand";
+  name: "note" | "image" | "board" | "home" | "plus" | "hand" | "connector";
 }) {
   const paths = {
     note: (
@@ -117,6 +119,7 @@ function Icon({
         <path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-8h6v8" />
       </>
     ),
+    connector: <path d="M3 20 21 4M14 4h7v7" />,
     plus: <path d="M12 4v16M4 12h16" />,
     hand: (
       <>
@@ -258,6 +261,7 @@ const CardView = memo(function CardView({
   return (
     <article
       id={`card-${card.id}`}
+      data-canvas-item={card.id}
       ref={node}
       tabIndex={-1}
       className={`card surface-${card.color}${selected ? " selected" : ""}`}
@@ -265,7 +269,7 @@ const CardView = memo(function CardView({
         left: card.x,
         top: card.y,
         width: card.width,
-        zIndex: selected ? 2147483647 : (card.order ?? 0),
+        zIndex: selected ? 2147483646 : (card.order ?? 0),
       }}
       onPointerDown={(e) => {
         e.stopPropagation();
@@ -448,6 +452,11 @@ const CardView = memo(function CardView({
 export default function App() {
   const [boards, setBoards] = useState<Board[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [selectedLine, setSelectedLine] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connectFrom, setConnectFrom] = useState("");
+  const [connectTo, setConnectTo] = useState("");
   const cardsRef = useRef<Card[]>([]);
   const [boardId, setBoardId] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -469,6 +478,7 @@ export default function App() {
   > | null>(null);
   const [hand, setHand] = useState(false);
   const space = useRef(false);
+  const suppressCanvasClick = useRef(false);
   const pan = useRef<{ x: number; y: number; camera: Camera } | null>(null);
   const { schedule, flush, status, error } = useSaves(importing);
   const currentBoard = boards.find((b) => b.id === boardId);
@@ -480,6 +490,82 @@ export default function App() {
   const itemCount = (id: string) =>
     cards.filter((c) => c.boardId === id && !c.trashed).length +
     boards.filter((b) => b.parentId === id && !b.trashed).length;
+  const itemLabel = (id: string) =>
+    boards.find((b) => b.id === id)?.title ||
+    cards
+      .find((c) => c.id === id)
+      ?.blocks.map((b) => (b.kind === "image" ? b.name : b.text))
+      .find(Boolean)
+      ?.slice(0, 45) ||
+    "Untitled item";
+  const items = [
+    ...visibleCards.map((c) => c.id),
+    ...childBoards.map((b) => b.id),
+  ];
+  const liveLines = connectors.filter(
+    (line) => line.boardId === boardId && connectorLive(line, boards, cards),
+  );
+  const currentLine = liveLines.find((line) => line.id === selectedLine);
+  const trashedLines = connectors.filter(
+    (line) =>
+      isBoardLive(boards, line.boardId) && !connectorLive(line, boards, cards),
+  );
+  const selectItem = useCallback((id: string | null) => {
+    setSelected(id);
+    setSelectedLine(null);
+  }, []);
+  const changeConnector = useCallback(
+    (line: Connector) => {
+      setConnectors((previous) =>
+        previous.some((c) => c.id === line.id)
+          ? previous.map((c) => (c.id === line.id ? line : c))
+          : [...previous, line],
+      );
+      schedule(`connector:${line.id}`, () => storage.saveConnector(line));
+    },
+    [schedule],
+  );
+  const connectItems = (fromId: string, toId: string, lineId?: string) => {
+    if (
+      !boardId ||
+      !items.includes(fromId) ||
+      !items.includes(toId) ||
+      fromId === toId
+    ) {
+      setNotice("Choose two different items on this board.");
+      return;
+    }
+    const previous = lineId
+      ? connectors.find((line) => line.id === lineId)
+      : undefined;
+    const line: Connector = previous
+      ? { ...previous, fromId, toId }
+      : {
+          id: id(),
+          boardId,
+          fromId,
+          toId,
+          arrow: "target",
+          color: LINE_COLORS[0].value,
+          trashed: false,
+        };
+    changeConnector(line);
+    setSelected(null);
+    setSelectedLine(line.id);
+    setConnecting(false);
+    setConnectFrom("");
+    setConnectTo("");
+  };
+  const pickConnectItem = (id: string) => {
+    if (!connectFrom) {
+      setConnectFrom(id);
+      selectItem(id);
+    } else connectItems(connectFrom, id);
+  };
+  const deleteConnector = () => {
+    if (currentLine) changeConnector({ ...currentLine, trashed: true });
+    setSelectedLine(null);
+  };
   const changeBoard = useCallback(
     (board: Board) => {
       setBoards((previous) =>
@@ -498,6 +584,7 @@ export default function App() {
         setBoards(lib.boards);
         cardsRef.current = lib.cards;
         setCards(lib.cards);
+        setConnectors(lib.connectors);
         cameras.current = lib.cameras;
         const last =
           lib.lastCanvas &&
@@ -560,13 +647,22 @@ export default function App() {
     [boardId, boards, changeCard, changeBoard],
   );
   const deleteCard = useCallback(
-    (cardId: string) => {
-      const card = cardsRef.current.find((c) => c.id === cardId);
-      if (!card) return;
-      changeCard({ ...card, trashed: true });
-      setSelected(null);
+    async (cardId: string) => {
+      try {
+        // Drain edits to incident lines first so deletion cannot strand a queued
+        // style edit which still expects the endpoint to be live.
+        await flush();
+        const card = cardsRef.current.find((c) => c.id === cardId);
+        if (!card) return;
+        changeCard({ ...card, trashed: true });
+        setSelected(null);
+        setSelectedLine(null);
+        await flush();
+      } catch (e) {
+        setNotice(`Could not delete card: ${String(e)}`);
+      }
     },
-    [changeCard],
+    [changeCard, flush],
   );
   const finishSave = useCallback(() => {
     void flush().catch(() => {});
@@ -594,6 +690,10 @@ export default function App() {
         await flush();
         schedule("session", () => storage.saveSession(next ?? HOME_CAMERA));
         setSelected(null);
+        setSelectedLine(null);
+        setConnecting(false);
+        setConnectFrom("");
+        setConnectTo("");
         setBoardId(next);
         setCamera(cameras.current[next ?? HOME_CAMERA] ?? INITIAL_CAMERA);
       } catch {
@@ -612,6 +712,8 @@ export default function App() {
         await storage.saveBoard(next);
         setBoards((previous) => previous.map((b) => (b.id === id ? next : b)));
         setSelected(null);
+        setSelectedLine(null);
+        setConnecting(false);
         if (boardId === id) {
           schedule("session", () =>
             storage.saveSession(board.parentId ?? HOME_CAMERA),
@@ -668,6 +770,10 @@ export default function App() {
       setBoards((previous) => [...previous, board]);
       schedule("session", () => storage.saveSession(board.id));
       setSelected(null);
+      setSelectedLine(null);
+      setConnecting(false);
+      setConnectFrom("");
+      setConnectTo("");
       setBoardId(board.id);
       setCamera(INITIAL_CAMERA);
     } catch (e) {
@@ -899,7 +1005,8 @@ export default function App() {
     const down = (e: KeyboardEvent) => {
       if (
         e.target instanceof HTMLTextAreaElement ||
-        e.target instanceof HTMLInputElement
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLSelectElement
       )
         return;
       if (e.code === "Space") {
@@ -908,10 +1015,18 @@ export default function App() {
       }
       if (e.key === "Escape") {
         setSelected(null);
+        setSelectedLine(null);
+        setConnecting(false);
+        setConnectFrom("");
+        setConnectTo("");
         setPreview(null);
         setShowTrash(false);
       }
       if (showTrash || preview) return;
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedLine) {
+        e.preventDefault();
+        deleteConnector();
+      }
       if ((e.key === "Delete" || e.key === "Backspace") && selected) {
         e.preventDefault();
         if (boards.some((b) => b.id === selected)) void deleteBoard(selected);
@@ -939,6 +1054,8 @@ export default function App() {
     zoomAt,
     selected,
     deleteCard,
+    selectedLine,
+    connectors,
     showTrash,
     preview,
     boards,
@@ -1085,6 +1202,20 @@ export default function App() {
           <span>Image</span>
         </button>
         <button
+          disabled={!boardId || importing}
+          className={connecting ? "active" : ""}
+          aria-pressed={connecting}
+          onClick={() => {
+            setConnecting((old) => !old);
+            setConnectFrom(selected ?? "");
+            setConnectTo("");
+            setSelectedLine(null);
+          }}
+        >
+          <Icon name="connector" />
+          <span>Connector</span>
+        </button>
+        <button
           className={hand ? "active" : ""}
           aria-pressed={hand}
           onClick={() => setHand((v) => !v)}
@@ -1102,7 +1233,8 @@ export default function App() {
           <span>
             Trash{" "}
             {cards.filter((c) => c.trashed).length +
-              boards.filter((b) => b.trashed).length || ""}
+              boards.filter((b) => b.trashed).length +
+              trashedLines.length || ""}
           </span>
         </button>
         <span className="rail-bottom">
@@ -1158,14 +1290,169 @@ export default function App() {
               : `${childBoards.length} boards${boardId ? ` · ${visibleCards.length} cards` : ""}`}
           </span>
         </div>
+        {boardId && !connecting && !currentLine && (
+          <div className="connector-tools">
+            <span>
+              Select an item, then drag its round handle to another item to
+              connect.
+            </span>
+          </div>
+        )}
+        {boardId && connecting && (
+          <div className="connector-tools" aria-label="Create connector">
+            <span>
+              {connectFrom
+                ? "Choose a target, or drag between items."
+                : "Choose two items to connect."}
+            </span>
+            <label>
+              From{" "}
+              <select
+                aria-label="New connector source"
+                value={connectFrom}
+                onChange={(e) => {
+                  setConnectFrom(e.target.value);
+                  selectItem(e.target.value || null);
+                }}
+              >
+                <option value="">Choose source</option>
+                {items.map((id) => (
+                  <option key={id} value={id}>
+                    {itemLabel(id)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              To{" "}
+              <select
+                aria-label="New connector target"
+                value={connectTo}
+                onChange={(e) => setConnectTo(e.target.value)}
+              >
+                <option value="">Choose target</option>
+                {items
+                  .filter((id) => id !== connectFrom)
+                  .map((id) => (
+                    <option key={id} value={id}>
+                      {itemLabel(id)}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <button
+              disabled={!connectFrom || !connectTo}
+              onClick={() => connectItems(connectFrom, connectTo)}
+            >
+              Connect
+            </button>
+            <button onClick={() => setConnecting(false)}>Cancel</button>
+          </div>
+        )}
+        {currentLine && !connecting && (
+          <div className="connector-tools" aria-label="Edit connector">
+            <label>
+              From{" "}
+              <select
+                aria-label="Connector source"
+                value={currentLine.fromId}
+                onChange={(e) =>
+                  changeConnector({ ...currentLine, fromId: e.target.value })
+                }
+              >
+                {items
+                  .filter((id) => id !== currentLine.toId)
+                  .map((id) => (
+                    <option key={id} value={id}>
+                      {itemLabel(id)}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              To{" "}
+              <select
+                aria-label="Connector target"
+                value={currentLine.toId}
+                onChange={(e) =>
+                  changeConnector({ ...currentLine, toId: e.target.value })
+                }
+              >
+                {items
+                  .filter((id) => id !== currentLine.fromId)
+                  .map((id) => (
+                    <option key={id} value={id}>
+                      {itemLabel(id)}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              Arrow{" "}
+              <select
+                aria-label="Connector arrow"
+                value={currentLine.arrow}
+                onChange={(e) =>
+                  changeConnector({
+                    ...currentLine,
+                    arrow: e.target.value as Connector["arrow"],
+                  })
+                }
+              >
+                <option value="target">Target arrow</option>
+                <option value="none">No arrow</option>
+              </select>
+            </label>
+            <div className="line-colors">
+              {LINE_COLORS.map((color) => (
+                <button
+                  key={color.value}
+                  style={{ background: color.value }}
+                  aria-label={`${color.name} connector colour`}
+                  aria-pressed={currentLine.color === color.value}
+                  onClick={() =>
+                    changeConnector({ ...currentLine, color: color.value })
+                  }
+                />
+              ))}
+            </div>
+            <button onClick={deleteConnector}>Delete connector</button>
+          </div>
+        )}
         <div
           ref={canvas}
           className={`canvas ${hand ? "hand-mode" : ""}`}
           tabIndex={0}
           aria-label={boardId ? "Board canvas" : "Home canvas"}
+          onPointerDownCapture={(e) => {
+            if (!connecting) return;
+            const item = (e.target as Element).closest<HTMLElement>(
+              "article[data-canvas-item]",
+            );
+            if (item?.dataset.canvasItem) {
+              e.preventDefault();
+              e.stopPropagation();
+              suppressCanvasClick.current = true;
+              pickConnectItem(item.dataset.canvasItem);
+            }
+          }}
+          onClickCapture={(e) => {
+            if (connecting || suppressCanvasClick.current) {
+              e.preventDefault();
+              e.stopPropagation();
+              suppressCanvasClick.current = false;
+            }
+          }}
+          onDoubleClickCapture={(e) => {
+            if (connecting) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          }}
           onPointerDown={(e) => {
             if (e.target !== e.currentTarget) return;
             setSelected(null);
+            setSelectedLine(null);
             if (space.current || hand || e.button === 1) {
               e.preventDefault();
               pan.current = { x: e.clientX, y: e.clientY, camera };
@@ -1194,6 +1481,23 @@ export default function App() {
               transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`,
             }}
           >
+            {boardId && (
+              <ConnectorLayer
+                key={boardId}
+                lines={liveLines}
+                itemIds={items}
+                selectedItem={selected}
+                selectedLine={selectedLine}
+                camera={camera}
+                canvas={canvas.current}
+                onSelect={(id) => {
+                  setSelectedLine(id);
+                  setSelected(null);
+                }}
+                onConnect={connectItems}
+                label={itemLabel}
+              />
+            )}
             {childBoards.map((board) => (
               <BoardTile
                 key={board.id}
@@ -1201,7 +1505,7 @@ export default function App() {
                 count={itemCount(board.id)}
                 selected={selected === board.id}
                 zoom={camera.zoom}
-                onSelect={setSelected}
+                onSelect={selectItem}
                 onChange={changeBoard}
                 onOrder={reorderItem}
                 onOpen={navigate}
@@ -1217,7 +1521,7 @@ export default function App() {
                   card={card}
                   selected={selected === card.id}
                   zoom={camera.zoom}
-                  onSelect={setSelected}
+                  onSelect={selectItem}
                   onChange={changeCard}
                   onImage={chooseImage}
                   onPreview={setPreview}
@@ -1283,8 +1587,29 @@ export default function App() {
                 </div>
               ))}
             {cards.filter((c) => c.trashed).length +
-              boards.filter((b) => b.trashed).length ===
+              boards.filter((b) => b.trashed).length +
+              trashedLines.length ===
               0 && <p>Your trash is empty.</p>}
+            {trashedLines.map((line) => (
+              <div className="trash-item" key={line.id}>
+                <div>
+                  <strong>
+                    {itemLabel(line.fromId)} → {itemLabel(line.toId)}
+                  </strong>
+                  <span>
+                    {endpointsAvailable(line, boards, cards)
+                      ? "Connector"
+                      : "Restore both endpoints on the same board first."}
+                  </span>
+                </div>
+                <button
+                  disabled={!endpointsAvailable(line, boards, cards)}
+                  onClick={() => changeConnector({ ...line, trashed: false })}
+                >
+                  Restore connector
+                </button>
+              </div>
+            ))}
             {cards
               .filter((c) => c.trashed)
               .map((card) => (

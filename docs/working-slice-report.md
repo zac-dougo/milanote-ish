@@ -53,6 +53,18 @@ Seven JS tests and seven Rust tests pass, covering save races/retry, deep breadc
 
 Resource observations above still refer to the earlier release, rather than a repeated benchmark of this increment.
 
+## Connector increment
+
+Connectors now join cards and nested-board tiles, snap to their borders, track movement/resizing, support target/no arrow and four colours, and allow endpoint reconnection and recoverable deletion. No graph library was added. Endpoint/subtree deletion makes incident lines effectively trashed through the endpoint's saved state; restoring both endpoints on the original board revives eligible lines, while manual line deletion remains independent.
+
+Ten JS tests and ten Rust tests passed, including geometry, effective-trash visibility, same-board validation, reconnection persistence, and schema-2 migration/recovery. Production build, formatting, Rust lint with warnings denied, and release packaging passed. Bundle size is 7.66 MiB.
+
+Browser checks exercised final handle creation, card/tile endpoints, reconnection, movement and resizing, style controls, Trash restoration, and board isolation. Native checks exercised source/target pickers, accessibility line activation, line Trash restoration, and quit/reopen with both lines and blue styling intact. A schema-v2 recovery copy was confirmed beside the native library.
+
+Native drag/scroll automation later could not locate its gesture target, despite the app remaining running and accessible. Final native gesture checks remain outstanding; they were verified in the browser preview. Handles were moved beside the top strip, outside the selection outline and above block controls, after observing overlap in the earlier layout. The measured canvas top remained unchanged when switching selection in the final browser layout.
+
+The existing physical-memory observations concern the earlier release. No new frame-rate or aggregate-memory claim is established by this increment.
+
 ## Remaining checks
 
-Finder drop and automated native trackpad pinch checks remain outstanding. The 500-card/200-connector fixture, measured frame timing, repeat-navigation memory growth, and a settled idle physical-footprint baseline remain outstanding. Connectors and rich text are not implemented yet.
+Finder drop and automated native trackpad pinch checks remain outstanding. The 500-card/200-connector fixture, measured frame timing, repeat-navigation memory growth, and a settled idle physical-footprint baseline remain outstanding. Rich text and the additional content block types remain unimplemented.

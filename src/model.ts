@@ -30,9 +30,19 @@ export type Board = {
   order: number;
 };
 export type Camera = { x: number; y: number; zoom: number };
+export type Connector = {
+  id: string;
+  boardId: string;
+  fromId: string;
+  toId: string;
+  arrow: "none" | "target";
+  color: string;
+  trashed: boolean;
+};
 export type Library = {
   boards: Board[];
   cards: Card[];
+  connectors: Connector[];
   cameras: Record<string, Camera>;
   lastCanvas: string | null;
 };
