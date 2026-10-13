@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backup;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -10,7 +12,7 @@ use std::{
 use tauri::{Emitter, Manager, State};
 
 type Result<T> = std::result::Result<T, String>;
-struct LibraryPath(PathBuf);
+struct LibraryPath(PathBuf, std::sync::Arc<std::sync::Mutex<()>>);
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +65,8 @@ enum Block {
     },
     Image {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alt: Option<String>,
         asset: String,
         thumbnail: String,
         name: String,
@@ -138,7 +142,7 @@ struct Camera {
     zoom: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Library {
     boards: Vec<Board>,
     cards: Vec<Card>,
@@ -156,6 +160,7 @@ struct Imported {
 }
 
 fn db(root: &Path) -> Result<Connection> {
+    backup::recover(root)?;
     fs::create_dir_all(root.join("assets")).map_err(|e| e.to_string())?;
     let mut conn = Connection::open(root.join("library.sqlite3")).map_err(|e| e.to_string())?;
     conn.busy_timeout(Duration::from_secs(5))
@@ -299,7 +304,30 @@ fn store_board(root: &Path, board: &Board) -> Result<()> {
     Ok(())
 }
 
-fn store_card(root: &Path, card: &Card) -> Result<()> {
+fn validate_card_content(root: &Path, card: &Card) -> Result<()> {
+    validate_card_with_refs(root, card, &std::collections::HashSet::new())
+}
+
+fn retained_refs(card: &Card) -> std::collections::HashSet<(String, String)> {
+    card.blocks
+        .iter()
+        .flat_map(|block| match block {
+            Block::Image {
+                id,
+                asset,
+                thumbnail,
+                ..
+            } => vec![(id.clone(), asset.clone()), (id.clone(), thumbnail.clone())],
+            Block::File { id, asset, .. } => vec![(id.clone(), asset.clone())],
+            _ => vec![],
+        })
+        .collect()
+}
+fn validate_card_with_refs(
+    root: &Path,
+    card: &Card,
+    retained: &std::collections::HashSet<(String, String)>,
+) -> Result<()> {
     uuid(&card.id)?;
     uuid(&card.board_id)?;
     if !card.order.is_finite()
@@ -350,11 +378,19 @@ fn store_card(root: &Path, card: &Card) -> Result<()> {
             Block::File {
                 id, asset, size, ..
             } => {
-                let metadata = fs::metadata(existing_asset(root, asset)?).map_err(|_| {
-                    "An imported file is missing. The card was not saved.".to_string()
-                })?;
-                if !metadata.is_file() || metadata.len() != *size {
-                    return Err("The imported file size has changed.".into());
+                asset_path(root, asset)?;
+                match existing_asset(root, asset)
+                    .and_then(|path| fs::metadata(path).map_err(|e| e.to_string()))
+                {
+                    Ok(metadata) => {
+                        if !metadata.is_file() || metadata.len() != *size {
+                            return Err("The imported file size has changed.".into());
+                        }
+                    }
+                    Err(error) if !retained.contains(&(id.clone(), asset.clone())) => {
+                        return Err(error)
+                    }
+                    Err(_) => {}
                 }
                 id
             }
@@ -365,7 +401,9 @@ fn store_card(root: &Path, card: &Card) -> Result<()> {
                 ..
             } => {
                 for name in [asset, thumbnail] {
-                    if !asset_path(root, name)?.is_file() {
+                    if !asset_path(root, name)?.is_file()
+                        && !retained.contains(&(id.clone(), name.clone()))
+                    {
                         return Err("An imported image is missing. The card was not saved.".into());
                     }
                 }
@@ -377,6 +415,11 @@ fn store_card(root: &Path, card: &Card) -> Result<()> {
             return Err("Duplicate content block identifier.".into());
         }
     }
+    Ok(())
+}
+
+fn store_card(root: &Path, card: &Card) -> Result<()> {
+    validate_card_content(root, card)?;
     let mut conn = db(root)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -483,14 +526,370 @@ fn store_connector(root: &Path, connector: &Connector) -> Result<()> {
     Ok(())
 }
 
+#[derive(Deserialize, Default)]
+struct Removed {
+    #[serde(default)]
+    boards: Vec<String>,
+    #[serde(default)]
+    cards: Vec<String>,
+    #[serde(default)]
+    connectors: Vec<String>,
+}
+#[derive(Deserialize, Default)]
+struct Patch {
+    #[serde(default)]
+    boards: Vec<Board>,
+    #[serde(default)]
+    cards: Vec<Card>,
+    #[serde(default)]
+    connectors: Vec<Connector>,
+    #[serde(default)]
+    removed: Removed,
+}
+
+fn store_patch(root: &Path, patch: &Patch) -> Result<()> {
+    let mut conn = db(root)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    tx.execute_batch("PRAGMA defer_foreign_keys=ON;")
+        .map_err(|e| e.to_string())?;
+    for (table, ids) in [
+        ("connectors", &patch.removed.connectors),
+        ("cards", &patch.removed.cards),
+        ("boards", &patch.removed.boards),
+    ] {
+        for id in ids {
+            uuid(id)?;
+            tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), [id])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    for id in &patch.removed.boards {
+        tx.execute("DELETE FROM cameras WHERE board_id=?1", [id])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE settings SET value='home' WHERE key='last_canvas' AND value=?1",
+            [id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for board in &patch.boards {
+        uuid(&board.id)?;
+        if !board.x.is_finite() || !board.y.is_finite() || !board.order.is_finite() {
+            return Err("Invalid board position.".into());
+        }
+        tx.execute(
+            "INSERT INTO boards VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+            params![
+                board.id,
+                serde_json::to_string(board).map_err(|e| e.to_string())?
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for card in &patch.cards {
+        let old: Option<String> = tx
+            .query_row("SELECT data FROM cards WHERE id=?1", [&card.id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let retained = old
+            .map(|json| {
+                serde_json::from_str::<Card>(&json)
+                    .map(|card| retained_refs(&card))
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        validate_card_with_refs(root, card, &retained)?;
+        tx.execute("INSERT INTO cards VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET board_id=excluded.board_id, data=excluded.data", params![card.id, card.board_id, serde_json::to_string(card).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
+    }
+    for line in &patch.connectors {
+        for id in [&line.id, &line.board_id, &line.from_id, &line.to_id] {
+            uuid(id)?;
+        }
+        if line.from_id == line.to_id
+            || !["none", "target"].contains(&line.arrow.as_str())
+            || !["#243b35", "#a04732", "#295c7b", "#466333"].contains(&line.color.as_str())
+        {
+            return Err("Invalid connector.".into());
+        }
+        tx.execute("INSERT INTO connectors VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET board_id=excluded.board_id, from_id=excluded.from_id, to_id=excluded.to_id, data=excluded.data", params![line.id, line.board_id, line.from_id, line.to_id, serde_json::to_string(line).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
+    }
+    // Validate the final graph, including hidden descendants and retained Trash lines.
+    // This permits undo and moves to restore multiple dependent entities together.
+    let read = |table: &str| -> Result<Vec<String>> {
+        let mut stmt = tx
+            .prepare(&format!("SELECT data FROM {table}"))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    };
+    let boards = read("boards")?
+        .into_iter()
+        .map(|json| serde_json::from_str::<Board>(&json).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>>>()?;
+    let cards = read("cards")?
+        .into_iter()
+        .map(|json| serde_json::from_str::<Card>(&json).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>>>()?;
+    let lines = read("connectors")?
+        .into_iter()
+        .map(|json| serde_json::from_str::<Connector>(&json).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>>>()?;
+    let board_map: std::collections::HashMap<_, _> = boards
+        .iter()
+        .map(|board| (board.id.as_str(), board))
+        .collect();
+    let card_map: std::collections::HashMap<_, _> =
+        cards.iter().map(|card| (card.id.as_str(), card)).collect();
+    for board in &boards {
+        if card_map.contains_key(board.id.as_str()) {
+            return Err("Duplicate canvas item identifier.".into());
+        }
+        let mut visited = std::collections::HashSet::from([board.id.as_str()]);
+        let mut next = board.parent_id.as_deref();
+        while let Some(parent) = next {
+            if !visited.insert(parent) {
+                return Err("A board cannot be placed inside itself or a descendant.".into());
+            }
+            next = board_map
+                .get(parent)
+                .ok_or("Missing parent board.")?
+                .parent_id
+                .as_deref();
+        }
+    }
+    let mut block_ids = std::collections::HashSet::new();
+    for card in &cards {
+        for block in &card.blocks {
+            let id = match block {
+                Block::Heading { id, .. }
+                | Block::Text { id, .. }
+                | Block::Quote { id, .. }
+                | Block::Link { id, .. }
+                | Block::Checklist { id, .. }
+                | Block::File { id, .. }
+                | Block::Image { id, .. } => id,
+            };
+            if !block_ids.insert(id) {
+                return Err("A content block cannot belong to two cards.".into());
+            }
+        }
+        if !board_map.contains_key(card.board_id.as_str()) {
+            return Err("Missing card owner.".into());
+        }
+    }
+    for line in &lines {
+        if !board_map.contains_key(line.board_id.as_str()) {
+            return Err("Missing connector owner.".into());
+        }
+        for endpoint in [&line.from_id, &line.to_id] {
+            let owner = card_map
+                .get(endpoint.as_str())
+                .map(|card| Some(card.board_id.as_str()))
+                .or_else(|| {
+                    board_map
+                        .get(endpoint.as_str())
+                        .map(|board| board.parent_id.as_deref())
+                })
+                .ok_or("Missing connector endpoint.")?;
+            if !line.trashed && owner != Some(line.board_id.as_str()) {
+                return Err("Connectors must remain on their endpoints' board.".into());
+            }
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct Geometry {
+    id: String,
+    x: f64,
+    y: f64,
+    width: Option<f64>,
+}
+fn store_geometry(root: &Path, items: &[Geometry]) -> Result<()> {
+    let mut conn = db(root)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    for item in items {
+        uuid(&item.id)?;
+        if !item.x.is_finite()
+            || !item.y.is_finite()
+            || item
+                .width
+                .is_some_and(|width| !(180.0..=1200.0).contains(&width))
+        {
+            return Err("Invalid geometry checkpoint.".into());
+        }
+        let saved: Option<String> = tx
+            .query_row("SELECT data FROM cards WHERE id=?1", [&item.id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(json) = saved {
+            let mut card: Card = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            card.x = item.x;
+            card.y = item.y;
+            if let Some(width) = item.width {
+                card.width = width;
+            }
+            tx.execute(
+                "UPDATE cards SET data=?2 WHERE id=?1",
+                params![
+                    card.id,
+                    serde_json::to_string(&card).map_err(|e| e.to_string())?
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            let mut board = read_board(&tx, &item.id)?;
+            board.x = item.x;
+            board.y = item.y;
+            tx.execute(
+                "UPDATE boards SET data=?2 WHERE id=?1",
+                params![
+                    board.id,
+                    serde_json::to_string(&board).map_err(|e| e.to_string())?
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+#[tauri::command]
+fn save_geometry(root: State<LibraryPath>, items: Vec<Geometry>) -> Result<()> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
+    store_geometry(&root.0, &items)
+}
+
+fn purge(root: &Path, patch: &Patch) -> Result<Vec<String>> {
+    if !patch.boards.is_empty() || !patch.cards.is_empty() || !patch.connectors.is_empty() {
+        return Err("Permanent deletion accepts only removals.".into());
+    }
+    store_patch(root, patch)?;
+    let library = match read_library(root) {
+        Ok(library) => library,
+        Err(error) => return Ok(vec![error]),
+    };
+    let retained: std::collections::HashSet<_> = library
+        .cards
+        .iter()
+        .flat_map(|card| &card.blocks)
+        .flat_map(|block| match block {
+            Block::Image {
+                asset, thumbnail, ..
+            } => vec![asset.as_str(), thumbnail.as_str()],
+            Block::File { asset, .. } => vec![asset.as_str()],
+            _ => vec![],
+        })
+        .collect();
+    let mut failures = Vec::new();
+    let entries = match fs::read_dir(root.join("assets")) {
+        Ok(entries) => entries,
+        Err(error) => return Ok(vec![error.to_string()]),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                failures.push(error.to_string());
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_owned = name
+            .get(..36)
+            .is_some_and(|key| uuid::Uuid::parse_str(key).is_ok());
+        if is_owned && !retained.contains(name.as_str()) {
+            if let Err(error) = fs::remove_file(entry.path()) {
+                failures.push(error.to_string());
+            }
+        }
+    }
+    Ok(failures)
+}
+#[tauri::command]
+fn purge_items(root: State<LibraryPath>, patch: Patch) -> Result<Vec<String>> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
+    purge(&root.0, &patch)
+}
+
+#[tauri::command]
+fn save_patch(root: State<LibraryPath>, patch: Patch) -> Result<()> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
+    store_patch(&root.0, &patch)
+}
+
 #[tauri::command]
 fn save_connector(root: State<LibraryPath>, connector: Connector) -> Result<()> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
     store_connector(&root.0, &connector)
 }
 
 #[tauri::command]
-fn load_library(root: State<LibraryPath>) -> Result<Library> {
-    let conn = db(&root.0)?;
+async fn load_library(root: State<'_, LibraryPath>) -> Result<Library> {
+    let lock = root.1.clone();
+    let root = root.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
+        let library = read_library(&root)?;
+        for block in library.cards.iter().flat_map(|card| &card.blocks) {
+            if let Block::Image {
+                asset, thumbnail, ..
+            } = block
+            {
+                let destination = asset_path(&root, thumbnail)?;
+                if !destination.exists() {
+                    let rebuild = || -> Result<()> {
+                        let bytes =
+                            fs::read(existing_asset(&root, asset)?).map_err(|e| e.to_string())?;
+                        let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+                        let mut output = std::io::Cursor::new(Vec::new());
+                        image
+                            .thumbnail(1000, 1000)
+                            .write_to(&mut output, image::ImageFormat::Png)
+                            .map_err(|e| e.to_string())?;
+                        durable_write(&destination, output.get_ref())
+                    };
+                    let _ = rebuild();
+                }
+            }
+        }
+        Ok(library)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn read_library(root: &Path) -> Result<Library> {
+    let mut connection = db(root)?;
+    let conn = connection.transaction().map_err(|e| e.to_string())?;
     let read = |table: &str| -> Result<Vec<String>> {
         let mut stmt = conn
             .prepare(&format!("SELECT data FROM {table} ORDER BY rowid"))
@@ -542,16 +941,28 @@ fn load_library(root: State<LibraryPath>) -> Result<Library> {
 
 #[tauri::command]
 fn save_card(root: State<LibraryPath>, card: Card) -> Result<()> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
     store_card(&root.0, &card)
 }
 
 #[tauri::command]
 fn save_board(root: State<LibraryPath>, board: Board) -> Result<()> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
     store_board(&root.0, &board)
 }
 
 #[tauri::command]
 fn save_session(root: State<LibraryPath>, canvas_id: String) -> Result<()> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
     let conn = db(&root.0)?;
     if canvas_id != "home" {
         uuid(&canvas_id)?;
@@ -563,6 +974,10 @@ fn save_session(root: State<LibraryPath>, canvas_id: String) -> Result<()> {
 
 #[tauri::command]
 fn save_camera(root: State<LibraryPath>, board_id: String, camera: Camera) -> Result<()> {
+    let _guard = root
+        .1
+        .lock()
+        .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
     if board_id != "home" {
         uuid(&board_id)?;
     }
@@ -629,8 +1044,12 @@ fn copy_image(root: &Path, bytes: &[u8], name: String) -> Result<Imported> {
 
 #[tauri::command]
 async fn import_image(root: State<'_, LibraryPath>, path: String) -> Result<Imported> {
+    let lock = root.1.clone();
     let root = root.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
         let source = Path::new(&path);
         let name = source
             .file_name()
@@ -646,10 +1065,16 @@ async fn import_image(root: State<'_, LibraryPath>, path: String) -> Result<Impo
 
 #[tauri::command]
 async fn import_clipboard(root: State<'_, LibraryPath>, bytes: Vec<u8>) -> Result<Imported> {
+    let lock = root.1.clone();
     let root = root.0.clone();
-    tauri::async_runtime::spawn_blocking(move || copy_image(&root, &bytes, "Pasted image".into()))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
+        copy_image(&root, &bytes, "Pasted image".into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -720,13 +1145,26 @@ fn copy_file(root: &Path, source: &Path) -> Result<ImportedFile> {
 
 #[tauri::command]
 async fn import_file(root: State<'_, LibraryPath>, path: String) -> Result<ImportedFile> {
+    let lock = root.1.clone();
     let root = root.0.clone();
-    tauri::async_runtime::spawn_blocking(move || copy_file(&root, Path::new(&path)))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
+        copy_file(&root, Path::new(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn validated_web_url(value: &str) -> Result<String> {
+    if value
+        .trim()
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("Enter an HTTP or HTTPS address without spaces or line breaks.".into());
+    }
     let url = url::Url::parse(value.trim())
         .map_err(|_| "Enter a valid HTTP or HTTPS address.".to_string())?;
     if !matches!(url.scheme(), "http" | "https")
@@ -768,8 +1206,46 @@ fn existing_asset(root: &Path, asset: &str) -> Result<PathBuf> {
 }
 
 #[tauri::command]
-fn open_asset(root: State<LibraryPath>, asset: String, reveal: bool) -> Result<()> {
-    let path = existing_asset(&root.0, &asset)?;
+async fn open_asset(root: State<'_, LibraryPath>, asset: String, reveal: bool) -> Result<()> {
+    let lock = root.1.clone();
+    let root = root.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Library operation failed. Restart the app.".to_string())?;
+        open_asset_copy(&root, &asset, reveal)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn open_asset_copy(root: &Path, asset: &str, reveal: bool) -> Result<()> {
+    let original = existing_asset(root, asset)?;
+    let library = read_library(root)?;
+    let name = library
+        .cards
+        .iter()
+        .flat_map(|card| &card.blocks)
+        .find_map(|block| match block {
+            Block::File {
+                asset: stored,
+                name,
+                ..
+            } if stored == asset => Some(name.as_str()),
+            _ => None,
+        })
+        .unwrap_or(asset);
+    let safe_name = Path::new(name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Attachment");
+    let directory = std::env::temp_dir()
+        .join("Milanote-ish")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let path = directory.join(safe_name);
+    fs::copy(original, &path).map_err(|e| e.to_string())?;
     let mut command = std::process::Command::new("/usr/bin/open");
     if reveal {
         command.arg("-R");
@@ -797,12 +1273,18 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let root = app.path().app_data_dir()?;
-            app.manage(LibraryPath(root));
+            app.manage(LibraryPath(root, Default::default()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             load_library,
             save_card,
+            save_patch,
+            save_geometry,
+            purge_items,
+            backup::export_backup,
+            backup::inspect_backup,
+            backup::restore_backup,
             save_connector,
             save_board,
             save_camera,
@@ -835,7 +1317,7 @@ mod tests {
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!("milanote-test-{}", uuid::Uuid::new_v4()))
     }
-    fn board(id: String, parent_id: Option<String>) -> Board {
+    pub(super) fn board(id: String, parent_id: Option<String>) -> Board {
         Board {
             id,
             title: "Storyboard".into(),
@@ -847,7 +1329,7 @@ mod tests {
             order: 0.0,
         }
     }
-    fn card(board_id: String) -> Card {
+    pub(super) fn card(board_id: String) -> Card {
         Card {
             id: uuid::Uuid::new_v4().to_string(),
             board_id,
@@ -875,6 +1357,251 @@ mod tests {
             trashed: false,
         }
     }
+    #[test]
+    fn checkpoints_preserve_new_text_and_deleted_assets_can_be_retained_or_removed() {
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let mut saved = card(owner.id.clone());
+        store_card(&root, &saved).unwrap();
+        saved.blocks = vec![Block::Text {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: "latest typing".into(),
+            document: None,
+        }];
+        store_card(&root, &saved).unwrap();
+        store_geometry(
+            &root,
+            &[Geometry {
+                id: saved.id.clone(),
+                x: 60.0,
+                y: 90.0,
+                width: Some(400.0),
+            }],
+        )
+        .unwrap();
+        let loaded = read_library(&root).unwrap();
+        assert!(
+            matches!(&loaded.cards[0].blocks[0], Block::Text { text, .. } if text == "latest typing")
+        );
+        assert_eq!(loaded.cards[0].width, 400.0);
+        let source = root.join("original.txt");
+        fs::write(&source, b"retained").unwrap();
+        let file = copy_file(&root, &source).unwrap();
+        let file_id = uuid::Uuid::new_v4().to_string();
+        saved.blocks.push(Block::File {
+            id: file_id,
+            asset: file.asset.clone(),
+            name: file.name,
+            size: file.size,
+            media_type: file.media_type,
+        });
+        store_patch(
+            &root,
+            &Patch {
+                cards: vec![saved.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        fs::remove_file(asset_path(&root, &file.asset).unwrap()).unwrap();
+        saved.x += 1.0;
+        store_patch(
+            &root,
+            &Patch {
+                cards: vec![saved.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut fresh = saved.clone();
+        fresh.id = uuid::Uuid::new_v4().to_string();
+        assert!(store_patch(
+            &root,
+            &Patch {
+                cards: vec![fresh],
+                ..Default::default()
+            }
+        )
+        .is_err());
+        saved.trashed = true;
+        store_patch(
+            &root,
+            &Patch {
+                cards: vec![saved],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn permanent_deletion_reclaims_only_unreferenced_assets_and_removes_views() {
+        let root = root();
+        let owner = board(uuid::Uuid::new_v4().to_string(), None);
+        store_board(&root, &owner).unwrap();
+        let source = root.join("script.txt");
+        fs::write(&source, b"shared").unwrap();
+        let file = copy_file(&root, &source).unwrap();
+        let mut a = card(owner.id.clone());
+        a.blocks = vec![Block::File {
+            id: uuid::Uuid::new_v4().to_string(),
+            asset: file.asset.clone(),
+            name: file.name,
+            size: file.size,
+            media_type: file.media_type,
+        }];
+        let mut b = a.clone();
+        b.id = uuid::Uuid::new_v4().to_string();
+        if let Block::File { id, .. } = &mut b.blocks[0] {
+            *id = uuid::Uuid::new_v4().to_string();
+        }
+        store_patch(
+            &root,
+            &Patch {
+                cards: vec![a.clone(), b.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        purge(
+            &root,
+            &Patch {
+                removed: Removed {
+                    cards: vec![a.id],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(asset_path(&root, &file.asset).unwrap().exists());
+        let conn = db(&root).unwrap();
+        conn.execute(
+            "INSERT INTO cameras VALUES (?1, ?2)",
+            params![owner.id, "{\"x\":0,\"y\":0,\"zoom\":1}"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings VALUES ('last_canvas', ?1)",
+            [&owner.id],
+        )
+        .unwrap();
+        drop(conn);
+        purge(
+            &root,
+            &Patch {
+                removed: Removed {
+                    cards: vec![b.id],
+                    boards: vec![owner.id.clone()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!asset_path(&root, &file.asset).unwrap().exists());
+        let library = read_library(&root).unwrap();
+        assert!(!library.cameras.contains_key(&owner.id));
+        assert_eq!(library.last_canvas.as_deref(), Some("home"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn group_mutations_move_lines_and_roll_back_invalid_graphs() {
+        let root = root();
+        let source = board(uuid::Uuid::new_v4().to_string(), None);
+        let destination = board(uuid::Uuid::new_v4().to_string(), None);
+        let a = card(source.id.clone());
+        let b = card(source.id.clone());
+        let edge = line(&source.id, &a.id, &b.id);
+        let initial = Patch {
+            boards: vec![source.clone(), destination.clone()],
+            cards: vec![a.clone(), b.clone()],
+            connectors: vec![edge.clone()],
+            ..Default::default()
+        };
+        store_patch(&root, &initial).unwrap();
+        let mut moved_a = a.clone();
+        moved_a.board_id = destination.id.clone();
+        let invalid = Patch {
+            cards: vec![moved_a.clone()],
+            ..Default::default()
+        };
+        assert!(store_patch(&root, &invalid).is_err());
+        let conn = db(&root).unwrap();
+        assert_eq!(
+            conn.query_row::<String, _, _>(
+                "SELECT board_id FROM cards WHERE id=?1",
+                [&a.id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+            source.id
+        );
+        drop(conn);
+        let mut moved_b = b.clone();
+        moved_b.board_id = destination.id.clone();
+        let mut moved_line = edge.clone();
+        moved_line.board_id = destination.id;
+        store_patch(
+            &root,
+            &Patch {
+                cards: vec![moved_a, moved_b],
+                connectors: vec![moved_line],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store_patch(&root, &initial).unwrap();
+        let mut deleted = source.clone();
+        deleted.trashed = true;
+        store_patch(
+            &root,
+            &Patch {
+                boards: vec![deleted],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store_patch(&root, &initial).unwrap();
+        let mut cycle = source.clone();
+        cycle.parent_id = Some(source.id.clone());
+        assert!(store_patch(
+            &root,
+            &Patch {
+                boards: vec![cycle],
+                ..Default::default()
+            }
+        )
+        .is_err());
+        assert!(store_patch(
+            &root,
+            &Patch {
+                removed: Removed {
+                    cards: vec![a.id.clone()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        )
+        .is_err());
+        store_patch(
+            &root,
+            &Patch {
+                removed: Removed {
+                    connectors: vec![edge.id],
+                    cards: vec![a.id, b.id],
+                    boards: vec![source.id],
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn mixed_content_and_formatting_survive_reopen() {
         let root = root();
@@ -1402,6 +2129,7 @@ mod tests {
         assert!(asset_path(&root, "../outside.png").is_err());
         let mut c = card(uuid::Uuid::new_v4().to_string());
         c.blocks = vec![Block::Image {
+            alt: None,
             id: uuid::Uuid::new_v4().to_string(),
             asset: "absent.png".into(),
             thumbnail: "absent-thumb.png".into(),

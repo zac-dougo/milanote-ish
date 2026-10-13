@@ -3,5 +3,5 @@
   "identifier": "main-window",
   "description": "Events and local image picker for the main window",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
 }

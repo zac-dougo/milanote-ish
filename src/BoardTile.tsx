@@ -3,13 +3,14 @@ import type { PointerEvent } from "react";
 import { COLORS } from "./model";
 import type { Board } from "./model";
 
-export const TILE_WIDTH = 240;
-export const TILE_HEIGHT = 180;
+export const TILE_WIDTH = 136;
+export const TILE_HEIGHT = 140;
 
 export const BoardTile = memo(function BoardTile({
   board,
   count,
   selected,
+  active,
   zoom,
   onChange,
   onSelect,
@@ -21,6 +22,7 @@ export const BoardTile = memo(function BoardTile({
   board: Board;
   count: number;
   selected: boolean;
+  active: boolean;
   zoom: number;
   onChange: (board: Board) => void;
   onSelect: (id: string) => void;
@@ -53,7 +55,7 @@ export const BoardTile = memo(function BoardTile({
       id={`board-${board.id}`}
       data-canvas-item={board.id}
       ref={node}
-      className={`canvas-board surface-${board.color}${selected ? " selected" : ""}`}
+      className={`canvas-board${selected ? " selected" : ""}`}
       style={{
         left: board.x,
         top: board.y,
@@ -101,7 +103,8 @@ export const BoardTile = memo(function BoardTile({
       }}
     >
       <div
-        className="card-grip"
+        className={`board-icon surface-${board.color}`}
+        data-move-handle
         role="button"
         tabIndex={0}
         aria-label={`Move board: ${board.title || "Untitled board"}`}
@@ -117,13 +120,20 @@ export const BoardTile = memo(function BoardTile({
         onPointerUp={finish}
         onPointerCancel={finish}
       >
-        <span className="grip-dots">⠿</span>
-        <span>BOARD</span>
+        <svg width="42" height="42" viewBox="0 0 42 42" aria-hidden="true">
+          <path d="M21 3 31 20H11Z" fill="currentColor" opacity=".5" />
+          <circle cx="11" cy="30" r="8" fill="currentColor" opacity=".5" />
+          <rect
+            x="22"
+            y="22"
+            width="16"
+            height="16"
+            rx="2"
+            fill="currentColor"
+          />
+        </svg>
       </div>
       <div className="board-tile-content">
-        <span className="board-initial">
-          {(board.title.trim() || "B").slice(0, 1).toUpperCase()}
-        </span>
         <input
           aria-label="Board tile title"
           value={board.title}
@@ -133,15 +143,17 @@ export const BoardTile = memo(function BoardTile({
         />
         <div className="board-tile-bottom">
           <span>{count} items</span>
-          <button
-            aria-label={`Open board: ${board.title || "Untitled board"}`}
-            onClick={() => onOpen(board.id)}
-          >
-            Open ↗
-          </button>
+          {active && (
+            <button
+              aria-label={`Open board: ${board.title || "Untitled board"}`}
+              onClick={() => onOpen(board.id)}
+            >
+              Open ↗
+            </button>
+          )}
         </div>
       </div>
-      {selected && (
+      {active && (
         <div className="card-tools">
           <button onClick={() => onOrder(board.id, true)}>
             Bring to front

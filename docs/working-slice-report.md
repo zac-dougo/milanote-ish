@@ -68,3 +68,10 @@ The existing physical-memory observations concern the earlier release. No new fr
 ## Remaining checks
 
 Finder drop and automated native trackpad pinch checks remain outstanding. The 500-card/200-connector fixture, measured frame timing, repeat-navigation memory growth, and a settled idle physical-footprint baseline remain outstanding. Rich text and the additional content block types remain unimplemented.
+
+
+## V1 editing completion, 13 October
+
+The remaining user-facing editing features are implemented: session undo/redo, multi-selection and group gestures, independent subtree/group duplication and internal copy/paste, cross-board moves with connector ownership changes, permanent deletion, portable hashed backup/validated restore, and compact nested-board icons. See the latest session handoff for implementation and recovery details.
+
+18 JavaScript and 20 Rust tests pass. Production build, formatting, Rust lint with warnings denied, and release packaging passed. The final ad-hoc-signed Apple Silicon bundle is 8.16 MiB. New checks exercise data and transaction behaviour, not native pointer gestures. No Preview or native UI walkthrough was performed for this increment, following the user's preference to test while using the app. Existing resource measurements do not describe this release; there is no new FPS, 500-card, idle-memory, or navigation-growth result. Feature implementation is complete, but full acceptance/performance validation remains outstanding.

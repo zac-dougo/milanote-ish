@@ -59,3 +59,50 @@ export async function openLink(url: string) {
   if (desktop) await invoke("open_link", { url });
   else window.open(url, "_blank", "noopener,noreferrer");
 }
+
+export async function savePatch(patch: import("./editing").Patch) {
+  if (desktop) await invoke("save_patch", { patch });
+}
+
+export type BackupInfo = {
+  boards: number;
+  cards: number;
+  connectors: number;
+  assets: number;
+  completedAt: number;
+  fingerprint: string;
+};
+export async function exportBackup(path: string) {
+  await invoke("export_backup", { path });
+}
+export async function inspectBackup(path: string): Promise<BackupInfo> {
+  return invoke("inspect_backup", { path });
+}
+export async function restoreBackup(path: string, fingerprint: string) {
+  await invoke("restore_backup", { path, fingerprint });
+}
+
+export async function saveGeometry(patch: import("./editing").Patch) {
+  if (desktop)
+    await invoke("save_geometry", {
+      items: [
+        ...patch.cards.map((card) => ({
+          id: card.id,
+          x: card.x,
+          y: card.y,
+          width: card.width,
+        })),
+        ...patch.boards.map((board) => ({
+          id: board.id,
+          x: board.x,
+          y: board.y,
+        })),
+      ],
+    });
+}
+
+export async function purgeItems(
+  patch: import("./editing").Patch,
+): Promise<string[]> {
+  return desktop ? invoke("purge_items", { patch }) : [];
+}

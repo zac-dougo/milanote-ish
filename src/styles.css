@@ -841,7 +841,7 @@ button:hover:not(:disabled) {
   border-bottom: 1px solid #243b3533;
   padding-bottom: 6px;
 }
-.card.selected .rich-toolbar {
+.card.editing .rich-toolbar {
   display: flex;
 }
 .rich-toolbar button {
@@ -868,4 +868,122 @@ button:hover:not(:disabled) {
 }
 .rich-link-entry button {
   font-size: 11px;
+}
+
+.canvas-board {
+  border: 0;
+  background: transparent;
+  min-height: 140px;
+  text-align: center;
+}
+.board-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 8px auto 9px;
+  color: #243b35;
+  cursor: grab;
+  touch-action: none;
+}
+.board-icon:active {
+  cursor: grabbing;
+}
+.canvas-board.selected {
+  outline: 1px solid #243b3566;
+  outline-offset: 3px;
+}
+.board-tile-content {
+  height: auto;
+  padding: 0 2px 8px;
+  gap: 5px;
+}
+.board-tile-content input {
+  text-align: center;
+  font-size: 14px;
+}
+.board-tile-bottom {
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 10px;
+}
+.canvas-board .card-tools {
+  position: absolute;
+  top: 145px;
+  left: -42px;
+  width: 220px;
+  background: var(--canvas);
+  border: 1px solid #243b3566;
+  text-align: left;
+}
+.path-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.breadcrumb button[aria-current="page"] {
+  border-bottom: 2px solid #dfbd58;
+}
+.history-controls {
+  display: flex;
+  gap: 5px;
+}
+.history-controls button {
+  font-size: 11px;
+  border: 1px solid #ffffff55;
+  padding: 5px 7px;
+}
+.selection-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 20px;
+  background: #dfbd58;
+  font-size: 12px;
+}
+.selection-tools button {
+  border-bottom: 1px solid #243b3577;
+  padding: 3px 0;
+}
+.selection-box {
+  position: absolute;
+  border: 1px solid #295c7b;
+  background: #295c7b22;
+  pointer-events: none;
+  z-index: 2147483647;
+}
+.working-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f2efe6dd;
+  color: #243b35;
+  font-size: 18px;
+}
+.item-context-menu {
+  position: fixed;
+  z-index: 30;
+  width: 170px;
+  background: #f2efe6;
+  border: 1px solid #243b35;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+}
+.item-context-menu button {
+  text-align: left;
+  padding: 8px;
+  font-size: 12px;
+}
+.item-context-menu button:hover {
+  background: #dfbd58;
 }

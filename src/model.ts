@@ -24,6 +24,7 @@ export type Block =
   | {
       id: string;
       kind: "image";
+      alt?: string;
       asset: string;
       thumbnail: string;
       name: string;
@@ -116,7 +117,9 @@ export function blockLabel(b: Block): string {
 }
 export function webUrl(value: string): URL | null {
   try {
-    const url = new URL(value.trim());
+    const trimmed = value.trim();
+    if (/\s|[\u0000-\u001f]/.test(trimmed)) return null;
+    const url = new URL(trimmed);
     return ["http:", "https:"].includes(url.protocol) &&
       !!url.hostname &&
       !url.username &&

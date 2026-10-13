@@ -6,10 +6,12 @@ import * as storage from "./storage";
 
 export function ContentBlock({
   value,
+  selected,
   onChange,
   onFlush,
 }: {
   value: Exclude<Block, { kind: "image" }>;
+  selected: boolean;
   onChange: (value: Block) => void;
   onFlush: () => void;
 }) {
@@ -62,9 +64,11 @@ export function ContentBlock({
       />
     );
   if (value.kind === "heading")
-    return textArea(value.text, "Card heading", (text) =>
-      onChange({ ...value, text }),
-    );
+    return selected || value.text
+      ? textArea(value.text, "Card heading", (text) =>
+          onChange({ ...value, text }),
+        )
+      : null;
   if (value.kind === "quote")
     return (
       <>
@@ -73,27 +77,33 @@ export function ContentBlock({
             onChange({ ...value, text }),
           )}
         </div>
-        <input
-          className="quote-attribution"
-          aria-label="Quote attribution"
-          placeholder="Attribution, optional"
-          value={value.attribution}
-          onBlur={onFlush}
-          onChange={(e) => onChange({ ...value, attribution: e.target.value })}
-        />
+        {(selected || value.attribution) && (
+          <input
+            className="quote-attribution"
+            aria-label="Quote attribution"
+            placeholder="Attribution, optional"
+            value={value.attribution}
+            onBlur={onFlush}
+            onChange={(e) =>
+              onChange({ ...value, attribution: e.target.value })
+            }
+          />
+        )}
       </>
     );
   if (value.kind === "link") {
     const url = webUrl(value.url);
     return (
       <div className="link-content">
-        <input
-          aria-label="Link title"
-          placeholder="Link title, optional"
-          value={value.title}
-          onBlur={onFlush}
-          onChange={(e) => onChange({ ...value, title: e.target.value })}
-        />
+        {(selected || value.title) && (
+          <input
+            aria-label="Link title"
+            placeholder="Link title, optional"
+            value={value.title}
+            onBlur={onFlush}
+            onChange={(e) => onChange({ ...value, title: e.target.value })}
+          />
+        )}
         <input
           aria-label="Link URL"
           placeholder="https://…"
@@ -194,44 +204,54 @@ export function ContentBlock({
               }
             }}
           />
-          <div className="checklist-actions">
-            <button
-              aria-label="Move checklist item up"
-              disabled={index === 0}
-              onClick={() => {
-                const next = [...items];
-                [next[index - 1], next[index]] = [next[index], next[index - 1]];
-                update(next);
-              }}
-            >
-              ↑
-            </button>
-            <button
-              aria-label="Move checklist item down"
-              disabled={index === items.length - 1}
-              onClick={() => {
-                const next = [...items];
-                [next[index + 1], next[index]] = [next[index], next[index + 1]];
-                update(next);
-              }}
-            >
-              ↓
-            </button>
-            <button
-              aria-label="Remove checklist item"
-              onClick={() => update(items.filter((v) => v.id !== item.id))}
-            >
-              ×
-            </button>
-          </div>
+          {selected && (
+            <div className="checklist-actions">
+              <button
+                aria-label="Move checklist item up"
+                disabled={index === 0}
+                onClick={() => {
+                  const next = [...items];
+                  [next[index - 1], next[index]] = [
+                    next[index],
+                    next[index - 1],
+                  ];
+                  update(next);
+                }}
+              >
+                ↑
+              </button>
+              <button
+                aria-label="Move checklist item down"
+                disabled={index === items.length - 1}
+                onClick={() => {
+                  const next = [...items];
+                  [next[index + 1], next[index]] = [
+                    next[index],
+                    next[index + 1],
+                  ];
+                  update(next);
+                }}
+              >
+                ↓
+              </button>
+              <button
+                aria-label="Remove checklist item"
+                onClick={() => update(items.filter((v) => v.id !== item.id))}
+              >
+                ×
+              </button>
+            </div>
+          )}
         </div>
       ))}
-      <button
-        className="add-checklist-item"
-        onClick={() => add(items.length - 1)}
-      >
-        + Item
-      </button>
+      {selected && (
+        <button
+          className="add-checklist-item"
+          onClick={() => add(items.length - 1)}
+        >
+          + Item
+        </button>
+      )}
     </div>
   );
 }
