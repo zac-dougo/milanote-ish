@@ -1,0 +1,33 @@
+{
+  "name": "milanote-ish",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "tauri": "tauri",
+    "format": "prettier --write src vite.config.ts index.html package.json tsconfig.json src-tauri/tauri.conf.json src-tauri/capabilities/default.json",
+    "format:check": "prettier --check src vite.config.ts index.html package.json tsconfig.json src-tauri/tauri.conf.json src-tauri/capabilities/default.json",
+    "test": "node --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.3",
+    "@tauri-apps/plugin-dialog": "2.8.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
